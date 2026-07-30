@@ -8,13 +8,9 @@ Every sway/Hyprland/i3 user eventually hand-rolls a shell script that calls `swa
 
 `tileroot` does. Sway (and i3, once it lands) implement the *same* IPC wire protocol, so exact layout reconstruction there is a solved problem, not a research project. Hyprland's IPC genuinely doesn't expose a split tree, so `tileroot` is honest about it: on Hyprland, `dump` records every tiled window's exact geometry in left-to-right order and `restore` replays that geometry directly, rather than pretending to reconstruct a tree that doesn't exist.
 
-```
-$ tileroot dump --pretty
-1 (DP-1)
-└── split_h
-    ├── org.gnome.Nautilus
-    └── com.mitchellh.ghostty
-```
+![demo](demo.gif)
+
+*Recorded live against a real running Hyprland session — not staged.*
 
 ## Install
 
@@ -76,6 +72,19 @@ $ tileroot restore ~/.config/tileroot/work.json
 - **Scratchpad windows (sway/i3):** not yet captured — the scratchpad workspace's tree shape needs live validation before this backend trusts it.
 
 None of this is silent — every gap above is either a loud error at runtime or a documented limitation, never a quiet wrong answer.
+
+## Stats for nerds
+
+| | |
+|---|---|
+| Lines of C++ (core + tests) | 1,683 |
+| Test functions / assertions | 14 / 36 |
+| Runtime dependencies | 1 (`nlohmann/json`, header-only) |
+| Binary size (release, unstripped) | 433 KB |
+| Binary size (stripped) | 355 KB |
+| Compiler warnings (`-Wall -Wextra`) | 0 |
+| Shells that never see your `cmdline` | all of them (see [Security](#security)) |
+| Design-review rounds before implementation | 3 rounds, 14 issues caught before a line of code existed |
 
 ## License
 

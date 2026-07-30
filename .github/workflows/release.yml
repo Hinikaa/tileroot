@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y nlohmann-json3-dev
+
+      - name: Run test suite
+        run: make test
+
+      - name: Build release binary
+        run: make tileroot
+
+      # Section 9A: catches a completely broken build before it ships —
+      # cheap insurance for a solo-maintainer project with no other release gate.
+      - name: Smoke test
+        run: |
+          ./tileroot --version
+          ./tileroot --help
+
+      - name: Package release asset
+        run: |
+          mkdir -p dist
+          # Naming convention shared by the AUR PKGBUILD and install.sh — see
+          # design doc "Release asset naming" implementation note.
+          tar -czf "dist/tileroot-linux-x86_64.tar.gz" tileroot README.md LICENSE completions/
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/tileroot-linux-x86_64.tar.gz
+          generate_release_notes: true

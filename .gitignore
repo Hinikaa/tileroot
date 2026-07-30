@@ -1,0 +1,5 @@
+tileroot
+test_session
+test_matcher
+*.tmp
+session.json

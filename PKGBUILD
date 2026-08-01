@@ -1,6 +1,6 @@
 # Maintainer: hina <192247746+Hinikaa@users.noreply.github.com>
 pkgname=tileroot
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="Save and restore tiling WM layouts across sway, Hyprland, and i3"
 arch=('x86_64')
@@ -9,7 +9,7 @@ license=('MIT')
 depends=('nlohmann-json' 'gcc-libs' 'libx11')
 makedepends=('gcc' 'make')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Hinikaa/tileroot/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('178276dd9d6d561ef6fca406522e28b3a9130c3800f71ea9bbda2b20b2f77244')
+sha256sums=('f3eaf92ca53ecf00f583e574d6470a0d2bca47a082c2d4f3a0e73cf7b06f590b')
 
 build() {
     cd "$pkgname-$pkgver"

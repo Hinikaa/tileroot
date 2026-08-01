@@ -9,7 +9,7 @@ license=('MIT')
 depends=('nlohmann-json' 'gcc-libs' 'libx11')
 makedepends=('gcc' 'make')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/Hinikaa/tileroot/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')  # replaced with a real checksum once v0.2.0 is tagged
+sha256sums=('178276dd9d6d561ef6fca406522e28b3a9130c3800f71ea9bbda2b20b2f77244')
 
 build() {
     cd "$pkgname-$pkgver"

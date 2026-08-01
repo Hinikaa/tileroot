@@ -11,8 +11,9 @@
 using json = nlohmann::json;
 
 namespace {
-constexpr uint32_t kGetTree = 4;
 constexpr uint32_t kRunCommand = 0;
+constexpr uint32_t kGetWorkspaces = 1;
+constexpr uint32_t kGetTree = 4;
 constexpr char kMagic[] = "i3-ipc";
 constexpr size_t kMagicLen = 6;
 constexpr size_t kHeaderLen = kMagicLen + 4 + 4;
@@ -112,6 +113,62 @@ std::optional<LayoutNode> node_to_layout(const json& node) {
     return split;
 }
 
+// Builds one WorkspaceSession from a GET_TREE workspace node (post
+// attach_cmdlines). Shared by both dump() paths (explicit --workspace name
+// search and focused-output enumeration) so the tree-to-session translation
+// logic exists exactly once.
+WorkspaceSession build_workspace_session(const json& ws_node, const std::string& output_name) {
+    WorkspaceSession ws;
+    ws.name = ws_node.value("name", "");
+    ws.output = output_name;
+
+    std::vector<json> tiled_children;
+    if (ws_node.contains("nodes")) {
+        for (const auto& c : ws_node["nodes"]) tiled_children.push_back(c);
+    }
+    if (tiled_children.empty()) {
+        // Section 1A: empty workspace → std::nullopt, not an empty split node.
+        ws.layout = std::nullopt;
+    } else if (tiled_children.size() == 1) {
+        ws.layout = node_to_layout(tiled_children[0]);  // already optional; nullopt if unrecoverable
+    } else {
+        LayoutNode root;
+        std::string layout = ws_node.value("layout", "splith");
+        root.type = layout == "splitv" ? LayoutNode::Type::SplitV : LayoutNode::Type::SplitH;
+        for (const auto& c : tiled_children) {
+            if (auto translated = node_to_layout(c)) {
+                root.children.push_back(std::move(*translated));
+            }
+        }
+        if (root.children.empty()) {
+            ws.layout = std::nullopt;
+        } else if (root.children.size() == 1) {
+            ws.layout = std::move(root.children[0]);
+        } else {
+            ws.layout = std::move(root);
+        }
+    }
+
+    if (ws_node.contains("floating_nodes")) {
+        for (const auto& fn : ws_node["floating_nodes"]) {
+            if (auto leaf = node_to_layout(fn); leaf && leaf->window) {
+                ws.floating.push_back(*leaf->window);
+            }
+        }
+    }
+    // Scratchpad capture (the "__i3_scratch" workspace's floating_nodes)
+    // needs live-sway validation of its exact tree shape before it can
+    // be trusted — left empty for now rather than shipping unverified
+    // logic. See README "Status".
+
+    // A window without a recoverable /proc cmdline (attach_cmdlines
+    // found nothing — permission denied, process already exited) is
+    // simply skipped from the dump: documented limitation, matches
+    // i3-resurrect's own approach to unrecoverable cmdlines.
+
+    return ws;
+}
+
 }  // namespace
 
 std::string I3ProtocolBackend::socket_path(const char* env_var) {
@@ -158,82 +215,57 @@ std::vector<WorkspaceSession> I3ProtocolBackend::dump(const std::string& workspa
     json tree = request(kGetTree, "");
     attach_cmdlines(tree);
 
-    // Find the focused output (or all outputs if we need every workspace
-    // — but the design doc scopes default dump to "current output," so we
-    // always resolve one output first).
-    const json* focused_output = nullptr;
-    if (tree.contains("nodes")) {
-        for (const auto& output : tree["nodes"]) {
-            if (output.value("type", "") != "output") continue;
-            if (!output.contains("nodes")) continue;
-            for (const auto& ws : output["nodes"]) {
-                if (ws.value("type", "") == "workspace" && ws.value("focused", false)) {
-                    focused_output = &output;
-                }
-            }
-        }
-    }
-    if (!focused_output && tree.contains("nodes") && !tree["nodes"].empty()) {
-        focused_output = &tree["nodes"][0];  // fallback: first output
-    }
-
     std::vector<WorkspaceSession> result;
-    if (!focused_output || !focused_output->contains("nodes")) return result;
+    if (!tree.contains("nodes")) return result;
 
-    for (const auto& ws_node : (*focused_output)["nodes"]) {
-        if (ws_node.value("type", "") != "workspace") continue;
-        std::string ws_name = ws_node.value("name", "");
-        if (!workspace_filter.empty() && ws_name != workspace_filter) continue;
-
-        WorkspaceSession ws;
-        ws.name = ws_name;
-        ws.output = focused_output->value("name", "");
-
-        std::vector<json> tiled_children;
-        if (ws_node.contains("nodes")) {
-            for (const auto& c : ws_node["nodes"]) tiled_children.push_back(c);
-        }
-        if (tiled_children.empty()) {
-            // Section 1A: empty workspace → std::nullopt, not an empty split node.
-            ws.layout = std::nullopt;
-        } else if (tiled_children.size() == 1) {
-            ws.layout = node_to_layout(tiled_children[0]);  // already optional; nullopt if unrecoverable
-        } else {
-            LayoutNode root;
-            std::string layout = ws_node.value("layout", "splith");
-            root.type = layout == "splitv" ? LayoutNode::Type::SplitV : LayoutNode::Type::SplitH;
-            for (const auto& c : tiled_children) {
-                if (auto translated = node_to_layout(c)) {
-                    root.children.push_back(std::move(*translated));
-                }
-            }
-            if (root.children.empty()) {
-                ws.layout = std::nullopt;
-            } else if (root.children.size() == 1) {
-                ws.layout = std::move(root.children[0]);
-            } else {
-                ws.layout = std::move(root);
+    if (!workspace_filter.empty()) {
+        // Explicit --workspace NAME: search every real output for a
+        // workspace with this name. Never the "__i3" pseudo-output — that's
+        // sway's internal scratchpad container, not a real workspace target
+        // (see the empty-filter comment below for why it matters here too).
+        for (const auto& output : tree["nodes"]) {
+            if (output.value("type", "") != "output" || output.value("name", "") == "__i3") continue;
+            if (!output.contains("nodes")) continue;
+            for (const auto& ws_node : output["nodes"]) {
+                if (ws_node.value("type", "") != "workspace") continue;
+                if (ws_node.value("name", "") != workspace_filter) continue;
+                result.push_back(build_workspace_session(ws_node, output.value("name", "")));
             }
         }
+        return result;
+    }
 
-        if (ws_node.contains("floating_nodes")) {
-            for (const auto& fn : ws_node["floating_nodes"]) {
-                if (auto leaf = node_to_layout(fn); leaf && leaf->window) {
-                    ws.floating.push_back(*leaf->window);
-                }
-            }
+    // No filter: dump every workspace on the currently focused output.
+    //
+    // GET_TREE's "focused" boolean is true on exactly the focused LEAF
+    // window, not on its ancestor workspace node — so checking
+    // ws_node["focused"] here essentially never matches in normal usage
+    // (a workspace with a real focused window inside it), and silently
+    // falls through to "whichever output appears first in the tree." That
+    // first output is sway's "__i3" scratchpad pseudo-output far more often
+    // than an actual monitor, which produced exactly this bug: `dump`
+    // returning only scratchpad windows. Caught by a real sway user testing
+    // this after the Reddit/Forums posts — see repo issue #1. Fixed by
+    // asking sway directly which workspace is focused via GET_WORKSPACES,
+    // which sway maintains correctly and does not include the scratchpad.
+    json workspaces = request(kGetWorkspaces, "");
+    std::string focused_output_name;
+    for (const auto& ws : workspaces) {
+        if (ws.value("focused", false)) {
+            focused_output_name = ws.value("output", "");
+            break;
         }
-        // Scratchpad capture (the "__i3_scratch" workspace's floating_nodes)
-        // needs live-sway validation of its exact tree shape before it can
-        // be trusted — left empty for now rather than shipping unverified
-        // logic. See README "Status".
+    }
+    if (focused_output_name.empty()) return result;  // no focused workspace — shouldn't happen on a live session
 
-        // A window without a recoverable /proc cmdline (attach_cmdlines
-        // found nothing — permission denied, process already exited) is
-        // simply skipped from the dump: documented limitation, matches
-        // i3-resurrect's own approach to unrecoverable cmdlines.
-
-        result.push_back(std::move(ws));
+    for (const auto& output : tree["nodes"]) {
+        if (output.value("type", "") != "output") continue;
+        if (output.value("name", "") != focused_output_name) continue;
+        if (!output.contains("nodes")) continue;
+        for (const auto& ws_node : output["nodes"]) {
+            if (ws_node.value("type", "") != "workspace") continue;
+            result.push_back(build_workspace_session(ws_node, focused_output_name));
+        }
     }
     return result;
 }

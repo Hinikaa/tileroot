@@ -2,6 +2,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -15,7 +16,6 @@ using json = nlohmann::json;
 
 namespace {
 constexpr uint32_t kRunCommand = 0;
-constexpr uint32_t kGetWorkspaces = 1;
 constexpr uint32_t kGetTree = 4;
 constexpr char kMagic[] = "i3-ipc";
 constexpr size_t kMagicLen = 6;
@@ -311,38 +311,22 @@ std::vector<WorkspaceSession> I3ProtocolBackend::dump(const std::string& workspa
         return result;
     }
 
-    // No filter: dump every workspace on the currently focused output.
-    //
-    // GET_TREE's "focused" boolean is true on exactly the focused LEAF
-    // window, not on its ancestor workspace node — so checking
-    // ws_node["focused"] here essentially never matches in normal usage
-    // (a workspace with a real focused window inside it), and silently
-    // falls through to "whichever output appears first in the tree." That
-    // first output is sway's "__i3" scratchpad pseudo-output far more often
-    // than an actual monitor, which produced exactly this bug: `dump`
-    // returning only scratchpad windows. Caught by a real sway user testing
-    // this after the Reddit/Forums posts — see repo issue #1. Fixed by
-    // asking sway directly which workspace is focused via GET_WORKSPACES,
-    // which sway maintains correctly and does not include the scratchpad.
-    json workspaces = request(kGetWorkspaces, "");
-    std::string focused_output_name;
-    for (const auto& ws : workspaces) {
-        if (ws.value("focused", false)) {
-            focused_output_name = ws.value("output", "");
-            break;
-        }
-    }
-    if (focused_output_name.empty()) return result;  // no focused workspace — shouldn't happen on a live session
-
+    // No filter: dump every workspace on every real output (monitor), not
+    // just the one the command was run from — a user with multiple monitors
+    // wants their whole session captured, not just whichever screen has
+    // focus. Never the "__i3" pseudo-output — that's sway/i3's internal
+    // scratchpad container, not a real workspace. Sorted by workspace
+    // number (see workspace_less) so the output is stable and matches how
+    // i3/sway itself orders workspaces, regardless of tree traversal order.
     for (const auto& output : tree["nodes"]) {
-        if (output.value("type", "") != "output") continue;
-        if (output.value("name", "") != focused_output_name) continue;
+        if (output.value("type", "") != "output" || output.value("name", "") == "__i3") continue;
         std::vector<const json*> workspaces_in_output;
         collect_workspaces(output, workspaces_in_output);
         for (const json* ws_node : workspaces_in_output) {
-            result.push_back(build_workspace_session(*ws_node, focused_output_name));
+            result.push_back(build_workspace_session(*ws_node, output.value("name", "")));
         }
     }
+    std::sort(result.begin(), result.end(), workspace_name_less);
     return result;
 }
 

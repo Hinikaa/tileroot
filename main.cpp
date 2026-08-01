@@ -255,7 +255,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (args[0] == "--version") {
-        std::cout << "tileroot 0.2.0\n";
+        std::cout << "tileroot 0.3.0\n";
         return 0;
     }
 

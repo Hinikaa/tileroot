@@ -56,3 +56,10 @@ SessionFile session_from_json(const nlohmann::json& j);
 // Unicode box-drawing tree renderer for `tileroot dump --pretty` — the
 // actual demo-GIF payoff (see design doc "What Makes This Cool").
 std::string render_pretty(const WorkspaceSession& ws);
+
+// Orders workspaces the way i3/sway/Hyprland bars do: by leading numeric
+// prefix ("1", "2: web", "10"), with non-numeric names sorted after all
+// numbered ones. Shared by every backend's no-filter dump() so `tileroot
+// dump` always returns workspaces "sorted after workspace 1,2,3,4"
+// regardless of which WM produced them or what order its IPC returned them.
+bool workspace_name_less(const WorkspaceSession& a, const WorkspaceSession& b);

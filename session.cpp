@@ -1,5 +1,6 @@
 #include "session.h"
 
+#include <cctype>
 #include <sstream>
 
 using json = nlohmann::json;
@@ -178,4 +179,19 @@ std::string render_pretty(const WorkspaceSession& ws) {
         for (const auto& w : ws.scratchpad) out << "  " << w.wm_class << "\n";
     }
     return out.str();
+}
+
+bool workspace_name_less(const WorkspaceSession& a, const WorkspaceSession& b) {
+    auto leading_num = [](const std::string& name) -> std::optional<long> {
+        size_t i = 0;
+        while (i < name.size() && std::isdigit(static_cast<unsigned char>(name[i]))) ++i;
+        if (i == 0) return std::nullopt;
+        return std::stol(name.substr(0, i));
+    };
+    auto na = leading_num(a.name);
+    auto nb = leading_num(b.name);
+    if (na && nb) return *na != *nb ? *na < *nb : a.name < b.name;
+    if (na && !nb) return true;
+    if (!na && nb) return false;
+    return a.name < b.name;
 }

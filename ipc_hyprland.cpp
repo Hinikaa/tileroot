@@ -63,22 +63,17 @@ void HyprlandBackend::check_version() {
     }
 }
 
-std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace_filter) {
-    std::string active_raw = send_command("j/activeworkspace");
-    json active = json::parse(active_raw, nullptr, false);
-    if (active.is_discarded()) {
-        throw IpcMalformedResponseError("activeworkspace reply was not valid JSON");
-    }
-    std::string target_name = workspace_filter.empty() ? active.value("name", "") : workspace_filter;
+namespace {
 
-    json clients = json::parse(send_command("j/clients"), nullptr, false);
-    if (!clients.is_array()) {
-        throw IpcMalformedResponseError("clients reply was not a JSON array");
-    }
-
+// Builds one WorkspaceSession from the full `j/clients` list, keeping only
+// windows whose workspace name matches `target_name`. Shared by both dump()
+// paths (explicit --workspace filter and the all-workspaces enumeration) so
+// the clients-to-session translation exists exactly once.
+WorkspaceSession build_hypr_workspace(const json& clients, const std::string& target_name,
+                                       const std::string& output_name) {
     WorkspaceSession ws;
     ws.name = target_name;
-    ws.output = active.value("monitor", "");
+    ws.output = output_name;
 
     std::vector<WindowInfo> tiled;
     for (const auto& c : clients) {
@@ -137,8 +132,44 @@ std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace
         ws.layout = std::move(root);
     }  // else: std::nullopt — Section 1A empty-workspace convention
 
+    return ws;
+}
+
+}  // namespace
+
+std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace_filter) {
+    json clients = json::parse(send_command("j/clients"), nullptr, false);
+    if (!clients.is_array()) {
+        throw IpcMalformedResponseError("clients reply was not a JSON array");
+    }
+
+    json workspaces = json::parse(send_command("j/workspaces"), nullptr, false);
+    if (!workspaces.is_array()) {
+        throw IpcMalformedResponseError("workspaces reply was not a JSON array");
+    }
+
     std::vector<WorkspaceSession> result;
-    result.push_back(std::move(ws));
+
+    if (!workspace_filter.empty()) {
+        std::string output_name;
+        for (const auto& w : workspaces) {
+            if (w.value("name", "") == workspace_filter) {
+                output_name = w.value("monitor", "");
+                break;
+            }
+        }
+        result.push_back(build_hypr_workspace(clients, workspace_filter, output_name));
+        return result;
+    }
+
+    // No filter: dump every workspace on every monitor — a user with
+    // multiple monitors wants their whole session captured, not just
+    // whichever one has focus. `j/workspaces` already enumerates every
+    // workspace with windows on it, across all monitors.
+    for (const auto& w : workspaces) {
+        result.push_back(build_hypr_workspace(clients, w.value("name", ""), w.value("monitor", "")));
+    }
+    std::sort(result.begin(), result.end(), workspace_name_less);
     return result;
 }
 

@@ -1,12 +1,12 @@
 # tileroot
 
-Save and restore your tiling window manager's layout across a reboot or crash — sway, Hyprland, and (soon) i3, all with one tool.
+Save and restore your tiling window manager's layout across a reboot or crash — sway, Hyprland, and i3, all with one tool.
 
 ## Overview
 
 Every sway/Hyprland/i3 user eventually hand-rolls a shell script that calls `swaymsg`/`hyprctl` + `jq` to save their window layout, and every one of those scripts breaks the next time the WM updates. The one existing attempt at a real tool, [`hypr-session-restore`](https://github.com/UpayanChatterjee/hypr-session-restore), is Hyprland-only and — by its own README — can't reconstruct the actual tiling layout tree, because Hyprland's IPC doesn't expose one. [`i3-resurrect`](https://github.com/JonnyHaystack/i3-resurrect) solves this well for i3, but nothing unifies i3, sway, and Hyprland in one tool.
 
-`tileroot` does. Sway (and i3, once it lands) implement the *same* IPC wire protocol, so exact layout reconstruction there is a solved problem, not a research project. Hyprland's IPC genuinely doesn't expose a split tree, so `tileroot` is honest about it: on Hyprland, `dump` records every tiled window's exact geometry in left-to-right order and `restore` replays that geometry directly, rather than pretending to reconstruct a tree that doesn't exist.
+`tileroot` does. Sway and i3 implement the *same* IPC wire protocol, and both expose `append_layout` — a native mechanism for pre-building a placeholder container tree with per-window match criteria, which relaunched processes then "swallow" into automatically. `restore` uses this directly, so the tiling structure that comes back is the actual tree, not a geometry approximation — live-verified: dump a nested layout, close everything, restore, dump again, byte-for-byte identical structure. Hyprland's IPC genuinely doesn't expose a split tree at all, so there `tileroot` is honest about the ceiling: `dump` records every tiled window's exact geometry in left-to-right order and `restore` replays that geometry directly, rather than pretending to reconstruct a tree that doesn't exist.
 
 ![demo](demo.gif)
 
@@ -30,7 +30,7 @@ git clone https://github.com/Hinikaa/tileroot
 cd tileroot
 make tileroot
 ```
-Requires a C++17 compiler and the `nlohmann-json` header (`nlohmann-json` on Arch, `nlohmann-json3-dev` on Debian/Ubuntu).
+Requires a C++17 compiler, the `nlohmann-json` header (`nlohmann-json` on Arch, `nlohmann-json3-dev` on Debian/Ubuntu), and `libX11` (`libx11` on Arch, `libx11-dev` on Debian/Ubuntu — used only to resolve a window's PID via `_NET_WM_PID` on i3, which doesn't include it in `GET_TREE` the way sway does; already present on any system that can run i3 as its WM).
 
 ## Usage
 
@@ -65,11 +65,17 @@ $ tileroot restore ~/.config/tileroot/work.json
 
 ## Status
 
-- **Hyprland backend: live-validated.** Written against and tested end-to-end against a real running Hyprland 0.56 session — `dump`, `--pretty`, atomic `-o` writes, schema validation, and the wm-mismatch/occupied-workspace refusal paths all confirmed working against real windows.
-- **Sway backend (`I3ProtocolBackend`): first real-world sway report received and fixed (v0.1.1).** A user tested `dump` on a live sway session and found it was only capturing scratchpad windows — `GET_TREE`'s `focused` flag lives on the focused leaf window, not its ancestor workspace, so the old focused-workspace detection silently fell through to "first output in the tree," which is sway's internal `__i3` scratchpad pseudo-output far more often than a real monitor. Fixed by asking sway directly via `GET_WORKSPACES` instead of inferring it from `GET_TREE`. Still not independently validated by the maintainer on a live sway session — real user testing is currently the only validation this backend has, which is better than none but not the same as maintainer-verified.
-- **i3 support:** not yet wired up (it reuses `I3ProtocolBackend` — same protocol as sway — so it's expected to be a small addition once sway is validated live, not a rewrite).
+- **Hyprland backend: live-validated.** Tested end-to-end against a real running Hyprland session — `dump`, `--pretty`, atomic `-o` writes, schema validation, and the wm-mismatch/occupied-workspace refusal paths all confirmed working against real windows.
+- **i3 backend (`I3ProtocolBackend`): live-validated against a real headless i3 session (v0.2.0).** Not just "should work" — actually tested: `dump`, `--pretty`, and a full `restore` round-trip including the `append_layout` tree reconstruction and floating-window restoration, verified byte-for-byte against the original layout. Two real bugs were found and fixed in the process (see below) that no amount of reading the protocol spec would have caught.
+- **Sway backend: shares 100% of the same code path as i3** (same `I3ProtocolBackend` class — sway implements i3's IPC directly, not a compatible reimplementation of it), so the fixes below should apply equally. Not independently re-verified against a live sway session by the maintainer, though — no sway binary available in this environment. If you run sway, testing this specific version is genuinely useful; the previous version had a real bug (below) that only surfaced on real sway.
+- **What got fixed getting i3 working, in order of discovery:**
+  1. A real sway user reported `dump` only capturing scratchpad windows (v0.1.1) — `GET_TREE`'s `focused` flag lives on the focused leaf window, not its ancestor workspace, so detection silently fell through to sway's internal `__i3` pseudo-output. Fixed via `GET_WORKSPACES` instead of inferring focus from `GET_TREE`.
+  2. Testing against real i3 found workspaces aren't direct children of an output in `GET_TREE` — they're nested inside a `"content"` wrapper alongside dock areas for bars. Fixed with a recursive search instead of assuming a fixed nesting depth.
+  3. i3's `GET_TREE` doesn't include a `"pid"` field on window nodes the way sway's does, so cmdline recovery silently failed for every window. Fixed by resolving the PID via the X11 `_NET_WM_PID` property instead (see the `libX11` dependency above).
+  4. `restore` was only doing geometry-based placement (position + resize) for all three backends — true for Hyprland by necessity, but sway/i3 don't need that limitation. Rebuilt to use `append_layout` for real tree reconstruction, and separately found that a relaunched window defaults to tiled regardless of how it was saved — floating state now has to be set explicitly.
 - **Multi-monitor on Hyprland:** not specifically validated. Single-monitor is the tested case.
-- **Scratchpad windows (sway/i3):** not yet captured — the scratchpad workspace's tree shape needs live validation before this backend trusts it.
+- **Multi-monitor / multi-workspace on sway/i3:** the `dump --workspace NAME` path searches every real output, and `restore` refuses per-workspace if occupied, but this hasn't been tested with more than one real output.
+- **Scratchpad windows (sway/i3) are still not captured** by `dump` — the `__i3_scratch` workspace is now correctly excluded from being mistaken for a real workspace, but its contents aren't read into the session yet. Separate from the bugs above; a real feature gap, not a bug.
 
 None of this is silent — every gap above is either a loud error at runtime or a documented limitation, never a quiet wrong answer.
 
@@ -77,14 +83,15 @@ None of this is silent — every gap above is either a loud error at runtime or 
 
 | | |
 |---|---|
-| Lines of C++ (core + tests) | 1,683 |
+| Lines of C++ (core + tests) | 1,981 |
 | Test functions / assertions | 14 / 36 |
-| Runtime dependencies | 1 (`nlohmann/json`, header-only) |
-| Binary size (release, unstripped) | 433 KB |
-| Binary size (stripped) | 355 KB |
+| Runtime dependencies | 2 (`nlohmann/json` header-only, `libX11`) |
+| Binary size (release, unstripped) | 453 KB |
+| Binary size (stripped) | 371 KB |
 | Compiler warnings (`-Wall -Wextra`) | 0 |
 | Shells that never see your `cmdline` | all of them (see [Security](#security)) |
 | Design-review rounds before implementation | 3 rounds, 14 issues caught before a line of code existed |
+| Real bugs found by real testing vs. by reading the spec | 4 vs. 0 |
 
 ## License
 

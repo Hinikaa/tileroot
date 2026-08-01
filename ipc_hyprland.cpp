@@ -155,13 +155,20 @@ std::vector<std::string> HyprlandBackend::list_windows(const std::string& wm_cla
 }
 
 void HyprlandBackend::place_window(const std::string& window_id, const WindowInfo& slot,
-                                    const std::string& target_workspace) {
+                                    const std::string& target_workspace, bool is_floating) {
     // window_id is a client "address" we parsed ourselves from our own IPC
     // response — safe to interpolate (Section 3B: structured, not
     // string-built from arbitrary/untrusted data). Workspace move (silent —
     // doesn't switch the user's focus) must happen before positioning, same
     // reasoning as the sway/i3 backend.
     send_command("dispatch movetoworkspacesilent name:" + target_workspace + ",address:" + window_id);
+    // Applying the same fix confirmed live on i3 (a relaunched window
+    // defaults to tiled, floating state must be forced explicitly) by
+    // analogy — Hyprland's `setfloating` dispatcher sets floating state on
+    // (as opposed to `togglefloating`, which would risk going the wrong way
+    // if the window somehow already floated by default). NOT live-verified
+    // against a real Hyprland session — see README Status.
+    if (is_floating) send_command("dispatch setfloating address:" + window_id);
     send_command("dispatch movewindowpixel exact " + std::to_string(slot.x) + " " + std::to_string(slot.y) +
                  ",address:" + window_id);
     send_command("dispatch resizewindowpixel exact " + std::to_string(slot.w) + " " + std::to_string(slot.h) +

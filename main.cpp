@@ -82,14 +82,26 @@ int run_dump(const std::string& workspace_filter, const std::string& out_file, b
 // workspace it belongs to via `slot_workspace` (parallel to the returned
 // vector by index) — WindowMatcher::PlaceFn needs this to move a
 // relaunched window to the right workspace before positioning it.
-void collect_slots(const LayoutNode& node, const std::string& ws_name, std::vector<WindowInfo>& slots,
-                    std::vector<std::string>& slot_workspace) {
+// `needs_placement` records whether place_window() should still run for
+// this slot: false when prepare_tree_layout() already put the WM's own
+// native placeholder-matching in charge of this window's position, true
+// when it needs the geometry-based fallback (Hyprland, or tree-layout
+// failing for some reason). Every slot collected here is tiled (from
+// ws.layout, not ws.floating), so it always needs floating explicitly OFF.
+void collect_slots(const LayoutNode& node, const std::string& ws_name, bool needs_placement,
+                    std::vector<WindowInfo>& slots, std::vector<std::string>& slot_workspace,
+                    std::vector<bool>& slot_needs_placement, std::vector<bool>& slot_is_floating) {
     if (node.type == LayoutNode::Type::Window) {
         slots.push_back(*node.window);
         slot_workspace.push_back(ws_name);
+        slot_needs_placement.push_back(needs_placement);
+        slot_is_floating.push_back(false);
         return;
     }
-    for (const auto& child : node.children) collect_slots(child, ws_name, slots, slot_workspace);
+    for (const auto& child : node.children) {
+        collect_slots(child, ws_name, needs_placement, slots, slot_workspace, slot_needs_placement,
+                      slot_is_floating);
+    }
 }
 
 int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
@@ -157,11 +169,29 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
 
     std::vector<WindowInfo> slots;
     std::vector<std::string> slot_workspace;
+    std::vector<bool> slot_needs_placement;
+    std::vector<bool> slot_is_floating;
     for (const auto& ws : session.workspaces) {
-        if (ws.layout) collect_slots(*ws.layout, ws.name, slots, slot_workspace);
+        if (ws.layout) {
+            // Try the WM's native tree-reconstruction mechanism first
+            // (i3/sway's append_layout) — if it works, place_window() is
+            // skipped for this workspace's tiled slots below, since the WM
+            // itself will place relaunched windows correctly via swallow
+            // matching. Falls back to per-window geometry placement
+            // (place_window) if unsupported (Hyprland) or the attempt fails.
+            bool tree_ready = current->prepare_tree_layout(*ws.layout, ws.name);
+            if (verbose) {
+                std::cerr << "verbose: tree layout for workspace " << ws.name << ": "
+                          << (tree_ready ? "prepared" : "unavailable, using geometry placement") << "\n";
+            }
+            collect_slots(*ws.layout, ws.name, /*needs_placement=*/!tree_ready, slots, slot_workspace,
+                          slot_needs_placement, slot_is_floating);
+        }
         for (const auto& w : ws.floating) {
             slots.push_back(w);
             slot_workspace.push_back(ws.name);
+            slot_needs_placement.push_back(true);  // floating windows are never part of the tiled tree-layout
+            slot_is_floating.push_back(true);
         }
     }
     if (slots.empty()) {
@@ -176,7 +206,9 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
     WindowMatcher matcher(
         cfg, [&](const std::string& wm_class) { return current->list_windows(wm_class); },
         [&](const std::string& window_id, size_t slot_index, const WindowInfo& slot) {
-            current->place_window(window_id, slot, slot_workspace[slot_index]);
+            if (slot_needs_placement[slot_index]) {
+                current->place_window(window_id, slot, slot_workspace[slot_index], slot_is_floating[slot_index]);
+            }
         });
 
     auto results = matcher.restore_all(slots, &g_interrupted);
@@ -223,7 +255,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (args[0] == "--version") {
-        std::cout << "tileroot 0.1.1\n";
+        std::cout << "tileroot 0.2.0\n";
         return 0;
     }
 

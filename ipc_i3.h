@@ -24,8 +24,15 @@ public:
 
     std::vector<WorkspaceSession> dump(const std::string& workspace_filter) override;
     std::vector<std::string> list_windows(const std::string& wm_class) override;
-    void place_window(const std::string& window_id, const WindowInfo& slot,
-                       const std::string& target_workspace) override;
+    void place_window(const std::string& window_id, const WindowInfo& slot, const std::string& target_workspace,
+                       bool is_floating) override;
+    // Builds an i3 layout-file (append_layout) with swallow criteria
+    // matching `layout`'s tree shape, writes it to a temp file, and runs
+    // `append_layout` on the focused/target workspace — i3's own native
+    // mechanism for exactly this (i3-resurrect uses the same command,
+    // independently arrived at here — see README license note re: GPLv3).
+    // Live-tested against a real headless i3 session; see README Status.
+    bool prepare_tree_layout(const LayoutNode& layout, const std::string& target_workspace) override;
     std::string wm_name() const override { return wm_name_; }
 
     // Returns the socket path from the env var, or empty if unset (used by

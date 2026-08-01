@@ -19,8 +19,8 @@ public:
 
     std::vector<WorkspaceSession> dump(const std::string& workspace_filter) override;
     std::vector<std::string> list_windows(const std::string& wm_class) override;
-    void place_window(const std::string& window_id, const WindowInfo& slot,
-                       const std::string& target_workspace) override;
+    void place_window(const std::string& window_id, const WindowInfo& slot, const std::string& target_workspace,
+                       bool is_floating) override;
     std::string wm_name() const override { return "hyprland"; }
 
     // Empty if Hyprland isn't running (HYPRLAND_INSTANCE_SIGNATURE unset).

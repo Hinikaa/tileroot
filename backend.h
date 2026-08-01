@@ -37,9 +37,34 @@ public:
     // Moves a matched window to `target_workspace` and resizes/repositions
     // it into its saved slot. The workspace move must happen — a relaunched
     // process otherwise lands on whatever workspace is currently focused,
-    // not necessarily the one it was saved from.
+    // not necessarily the one it was saved from. `is_floating` must be
+    // honored explicitly — a relaunched window defaults to tiled regardless
+    // of what it was saved as (confirmed via live testing: a saved floating
+    // window came back tiled until this was made an explicit step), so a
+    // true implementation needs to force floating state before positioning.
+    //
+    // NOTE: for a tiled window on a backend where prepare_tree_layout()
+    // succeeded, the caller skips this call entirely — the WM already
+    // placed the window correctly via its own native swallow/placeholder
+    // matching, and calling place_window on top of that would be redundant
+    // (and for a real tiling WM, actively wrong — there's no "position" to
+    // move a tiled window to outside its container). Still called normally
+    // for floating windows and for any backend without tree-layout support.
     virtual void place_window(const std::string& window_id, const WindowInfo& slot,
-                               const std::string& target_workspace) = 0;
+                               const std::string& target_workspace, bool is_floating) = 0;
+
+    // Attempts to pre-build the exact tiled container structure of `layout`
+    // on `target_workspace` before any window is launched, so relaunched
+    // processes land in the right split position automatically instead of
+    // being placed by geometry after the fact. Returns false if this
+    // backend has no such mechanism (e.g. Hyprland, whose IPC doesn't
+    // expose a real split tree to rebuild in the first place) or if the
+    // attempt itself failed for any reason — either way, the caller falls
+    // back to per-window geometry placement via place_window(), so this is
+    // always safe to call speculatively.
+    virtual bool prepare_tree_layout(const LayoutNode& /*layout*/, const std::string& /*target_workspace*/) {
+        return false;
+    }
 
     // "sway" | "i3" | "hyprland" — for error messages and the session.json wm field.
     virtual std::string wm_name() const = 0;

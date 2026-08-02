@@ -37,11 +37,23 @@ Requires a C++17 compiler, the `nlohmann-json` header (`nlohmann-json` on Arch, 
 ```
 tileroot dump [--workspace NAME] [-o FILE] [--pretty] [--verbose]
 tileroot restore [FILE] [--dry-run] [--verbose]
+tileroot doctor [FILE]
 ```
 
 `dump` with no `-o` prints session JSON to stdout; `-o FILE` writes it atomically (a crash or Ctrl-C mid-write never corrupts an existing save). `--pretty` prints a human-readable box-drawing tree instead — good for a screenshot, not meant to be parsed. `restore` reads `session.json` in the current directory by default, or a path you give it; `--dry-run` shows what it *would* do without launching anything.
 
 `restore` refuses to run if the target workspace already has windows — it never merges or clobbers. If some windows can't be matched within 5 seconds (app didn't start in time, binary went missing) it logs a warning, places everything it could, and exits non-zero so scripts can detect a partial restore.
+
+`doctor` checks every precondition a `restore` would need — WM detected, IPC socket reachable, session file present and valid, `wm` field matches what's running, and each target workspace is free — and reports pass/fail on all of them instead of stopping at the first problem, so you know *why* a restore would fail before running it:
+```
+$ tileroot doctor
+[ok]   window manager detected: hyprland
+[ok]   hyprland IPC socket is reachable
+[ok]   session file is valid: session.json
+[ok]   session matches the running window manager (hyprland)
+[FAIL] workspace 1 is free to restore into
+  already has windows -- restore will refuse this workspace
+```
 
 ## Example
 
@@ -76,6 +88,8 @@ $ tileroot restore ~/.config/tileroot/work.json
   5. `dump` with no `--workspace` filter only ever returned workspaces on one output/monitor — the one the command was run from — instead of every workspace on every monitor (v0.3.0). Fixed for both the i3/sway and Hyprland backends: `dump` now enumerates every real output/monitor and returns all of its workspaces, sorted the way i3/sway/Hyprland bars order them (by leading workspace number). `restore` already distributed windows to their saved workspace names correctly — verified live rather than assumed.
 - **Multi-monitor / multi-workspace on sway/i3/Hyprland:** now live-tested (v0.3.0) — see above. `restore` refuses per-workspace if occupied, and reconstructs each workspace independently.
 - **Scratchpad windows (sway/i3) are still not captured** by `dump` — the `__i3_scratch` workspace is now correctly excluded from being mistaken for a real workspace, but its contents aren't read into the session yet. Separate from the bugs above; a real feature gap, not a bug.
+- **`tileroot doctor` (v0.4.0):** checks WM detection, IPC reachability, session-file validity, wm match, and per-workspace occupancy up front and reports pass/fail on each, instead of restore stopping at the first failure. Live-tested against a real running Hyprland desktop, including the occupied-workspace and malformed-file/missing-file paths.
+- **`dump` now warns instead of silently dropping a window it can't recover a `cmdline` for (v0.4.0)** — previously a window with no readable `/proc/<pid>/cmdline` (process already exited, `/proc` access denied, or no pid at all) just vanished from the session file with no explanation; now `dump` prints exactly which of those reasons applies, for both the i3/sway and Hyprland backends.
 
 None of this is silent — every gap above is either a loud error at runtime or a documented limitation, never a quiet wrong answer.
 
@@ -83,11 +97,11 @@ None of this is silent — every gap above is either a loud error at runtime or 
 
 | | |
 |---|---|
-| Lines of C++ (core + tests) | 2,019 |
+| Lines of C++ (core + tests) | 2,196 |
 | Test functions / assertions | 14 / 36 |
 | Runtime dependencies | 2 (`nlohmann/json` header-only, `libX11`) |
-| Binary size (release, unstripped) | 463 KB |
-| Binary size (stripped) | 379 KB |
+| Binary size (release, unstripped) | 476 KB |
+| Binary size (stripped) | 391 KB |
 | Compiler warnings (`-Wall -Wextra`) | 0 |
 | Shells that never see your `cmdline` | all of them (see [Security](#security)) |
 | Design-review rounds before implementation | 3 rounds, 14 issues caught before a line of code existed |

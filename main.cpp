@@ -1,4 +1,5 @@
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -14,10 +15,74 @@ constexpr auto kDefaultTimeout = std::chrono::milliseconds(5000);  // Section 2A
 std::atomic<bool> g_interrupted{false};
 void handle_sigint(int) { g_interrupted.store(true); }
 
+// Reports exactly which env var(s) detect_backend() checked and whether
+// each was set, instead of a flat "no WM detected" -- the difference
+// between "none of these are set at all" (wrong shell/session) and "one
+// is set but something's still wrong" is itself diagnostic, and this is
+// the cheapest place to say so: it's already the failure path.
+void log_wm_detection_failure() {
+    auto describe = [](const char* var) {
+        const char* v = std::getenv(var);
+        std::cerr << "  " << var << ": " << (v && v[0] != '\0' ? "set" : "not set") << "\n";
+    };
+    std::cerr << "error: no supported window manager detected (checked sway, hyprland, i3)\n";
+    describe("HYPRLAND_INSTANCE_SIGNATURE");
+    describe("SWAYSOCK");
+    describe("I3SOCK");
+    std::cerr << "is this running inside your Hyprland/sway/i3 session? (not, say, an SSH shell "
+                 "or a terminal with a stale/inherited environment)\n";
+}
+
+// Same exception, better-targeted advice per failure mode -- the raw
+// what() message alone doesn't tell you what to actually go check.
+// `context` replaces the default "error: " prefix for call sites that
+// need to say what they were doing when it failed (e.g. which workspace).
+void log_ipc_failure(const std::exception& e, const std::string& context = "error: ") {
+    std::cerr << context << e.what() << "\n";
+    if (dynamic_cast<const IpcConnectionError*>(&e)) {
+        std::cerr << "couldn't reach the WM's IPC socket -- either the socket file doesn't exist, or "
+                      "nothing is listening on it. Is it still running, or did it restart since this shell "
+                      "started?\n";
+    } else if (dynamic_cast<const IpcTimeoutError*>(&e)) {
+        std::cerr << "connected, but got no response in time -- is the WM hung or overloaded?\n";
+    } else if (dynamic_cast<const IpcMalformedResponseError*>(&e)) {
+        std::cerr << "connected and got a response, but couldn't make sense of it -- wrong WM "
+                      "version, or something else is listening on that socket?\n";
+    }
+}
+
 void print_usage() {
     std::cerr << "usage: tileroot dump [--workspace NAME] [-o FILE] [--pretty] [--verbose]\n"
                  "       tileroot restore [FILE] [--dry-run] [--verbose]\n"
+                 "       tileroot doctor [FILE]\n"
                  "       tileroot --version | --help\n";
+}
+
+enum class SessionLoadStatus { Ok, NotFound, ParseError, SchemaError };
+
+// Shared by run_restore and run_doctor so "read + parse + validate a session
+// file" exists exactly once — doctor needs the same three failure modes
+// restore already distinguishes (missing file / bad JSON / schema mismatch),
+// just reported instead of acted on.
+SessionLoadStatus load_session_file(const std::string& path, SessionFile& out, std::string& err) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return SessionLoadStatus::NotFound;
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(content);
+    } catch (const nlohmann::json::parse_error& e) {
+        err = e.what();
+        return SessionLoadStatus::ParseError;
+    }
+    try {
+        out = session_from_json(j);
+    } catch (const SchemaValidationError& e) {
+        err = e.what();
+        return SessionLoadStatus::SchemaError;
+    }
+    return SessionLoadStatus::Ok;
 }
 
 // Section 1C/2C: write to a temp file then rename() so FILE is never left
@@ -48,7 +113,7 @@ bool atomic_write(const std::string& path, const std::string& content) {
 int run_dump(const std::string& workspace_filter, const std::string& out_file, bool pretty, bool verbose) {
     auto backend = detect_backend(kDefaultTimeout);
     if (!backend) {
-        std::cerr << "error: no supported window manager detected (checked sway, hyprland, i3)\n";
+        log_wm_detection_failure();
         return 1;
     }
     if (verbose) std::cerr << "verbose: detected wm=" << backend->wm_name() << "\n";
@@ -57,7 +122,7 @@ int run_dump(const std::string& workspace_filter, const std::string& out_file, b
     try {
         workspaces = backend->dump(workspace_filter);
     } catch (const std::exception& e) {
-        std::cerr << "error: " << e.what() << "\n";
+        log_ipc_failure(e);
         return 1;
     }
 
@@ -106,32 +171,25 @@ void collect_slots(const LayoutNode& node, const std::string& ws_name, bool need
 
 int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
     std::string path = file_arg.empty() ? "session.json" : file_arg;
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        std::cerr << "error: session file not found: " << path << "\n";
-        return 1;
-    }
-    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-
-    nlohmann::json j;
-    try {
-        j = nlohmann::json::parse(content);
-    } catch (const nlohmann::json::parse_error& e) {
-        std::cerr << "error: malformed session file: " << e.what() << "\n";
-        return 1;
-    }
-
     SessionFile session;
-    try {
-        session = session_from_json(j);
-    } catch (const SchemaValidationError& e) {
-        std::cerr << "error: " << e.what() << "\n";
-        return 1;
+    std::string load_err;
+    switch (load_session_file(path, session, load_err)) {
+        case SessionLoadStatus::NotFound:
+            std::cerr << "error: session file not found: " << path << "\n";
+            return 1;
+        case SessionLoadStatus::ParseError:
+            std::cerr << "error: malformed session file: " << load_err << "\n";
+            return 1;
+        case SessionLoadStatus::SchemaError:
+            std::cerr << "error: " << load_err << "\n";
+            return 1;
+        case SessionLoadStatus::Ok:
+            break;
     }
 
     auto current = detect_backend(kDefaultTimeout);
     if (!current) {
-        std::cerr << "error: no supported window manager detected (checked sway, hyprland, i3)\n";
+        log_wm_detection_failure();
         return 1;
     }
     if (current->wm_name() != session.wm) {
@@ -150,7 +208,7 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
         try {
             live = current->dump(ws.name);
         } catch (const std::exception& e) {
-            std::cerr << "error: could not check target workspace " << ws.name << ": " << e.what() << "\n";
+            log_ipc_failure(e, "error: could not check target workspace " + ws.name + ": ");
             return 1;
         }
         bool occupied = !live.empty() && (live[0].layout.has_value() || !live[0].floating.empty());
@@ -242,6 +300,74 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
     return failed > 0 ? 1 : 0;  // Section 1B: non-zero on any partial failure
 }
 
+// Runs every precondition restore itself would check (WM detected, IPC
+// reachable, session file parses, wm matches, target workspaces free) and
+// reports each one instead of stopping at the first failure like restore
+// does — the point is to tell you *why* a restore would fail before you run
+// it, not to restore anything. Reuses detect_backend/log_wm_detection_failure
+// /log_ipc_failure/load_session_file rather than re-deriving any of it.
+int run_doctor(const std::string& file_arg) {
+    bool all_ok = true;
+    auto check = [&](bool ok, const std::string& label) {
+        std::cout << (ok ? "[ok]   " : "[FAIL] ") << label << "\n";
+        if (!ok) all_ok = false;
+    };
+
+    auto backend = detect_backend(kDefaultTimeout);
+    check(backend != nullptr, backend ? ("window manager detected: " + backend->wm_name())
+                                       : "window manager detected");
+    if (!backend) {
+        log_wm_detection_failure();
+        return 1;
+    }
+
+    try {
+        backend->dump("");
+        check(true, backend->wm_name() + " IPC socket is reachable");
+    } catch (const std::exception& e) {
+        check(false, backend->wm_name() + " IPC socket is reachable");
+        log_ipc_failure(e, "  ");
+    }
+
+    std::string path = file_arg.empty() ? "session.json" : file_arg;
+    SessionFile session;
+    std::string load_err;
+    auto load_status = load_session_file(path, session, load_err);
+    if (load_status == SessionLoadStatus::NotFound) {
+        if (file_arg.empty()) {
+            std::cout << "[skip] no session.json in the current directory (nothing to restore yet)\n";
+            return all_ok ? 0 : 1;
+        }
+        check(false, "session file exists: " + path);
+        return 1;
+    }
+    check(load_status == SessionLoadStatus::Ok, "session file is valid: " + path);
+    if (load_status != SessionLoadStatus::Ok) {
+        std::cout << "  " << load_err << "\n";
+        return 1;
+    }
+
+    bool wm_match = backend->wm_name() == session.wm;
+    check(wm_match, "session matches the running window manager (" + backend->wm_name() + ")");
+    if (!wm_match) std::cout << "  session was saved for " << session.wm << "\n";
+
+    for (const auto& ws : session.workspaces) {
+        std::vector<WorkspaceSession> live;
+        try {
+            live = backend->dump(ws.name);
+        } catch (const std::exception& e) {
+            check(false, "workspace " + ws.name + " is reachable");
+            log_ipc_failure(e, "  ");
+            continue;
+        }
+        bool occupied = !live.empty() && (live[0].layout.has_value() || !live[0].floating.empty());
+        check(!occupied, "workspace " + ws.name + " is free to restore into");
+        if (occupied) std::cout << "  already has windows -- restore will refuse this workspace\n";
+    }
+
+    return all_ok ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -255,7 +381,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (args[0] == "--version") {
-        std::cout << "tileroot 0.3.0\n";
+        std::cout << "tileroot 0.4.0\n";
         return 0;
     }
 
@@ -298,6 +424,20 @@ int main(int argc, char** argv) {
             }
         }
         return run_restore(file_arg, dry_run, verbose);
+    }
+
+    if (command == "doctor") {
+        std::string file_arg;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i][0] != '-') {
+                file_arg = args[i];
+            } else {
+                std::cerr << "error: unrecognized argument: " << args[i] << "\n";
+                print_usage();
+                return 1;
+            }
+        }
+        return run_doctor(file_arg);
     }
 
     std::cerr << "error: unknown command: " << command << "\n";

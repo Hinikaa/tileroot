@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iostream>
 
 #include "ipc_socket.h"
 #include "x11_pid.h"
@@ -75,17 +76,48 @@ std::vector<std::string> read_proc_cmdline(long pid) {
 // to map an X11 window to its owning process. `x11` may be an inert
 // resolver (no X11 available, e.g. under sway/Hyprland) — pid_for_window
 // just returns nullopt in that case, same as any other unrecoverable window.
+// A window leaf ending up with no "_cmdline" means it silently vanishes
+// from the dump (node_to_layout below skips it) -- that's a real "why
+// didn't this restore" surprise if it happens quietly, so it's logged
+// here, at the one place that actually knows which of the three reasons
+// applies, rather than left for the user to guess at from a shorter
+// session.json than they expected.
+void warn_unrecoverable_window(const json& node, bool had_native_pid, bool x11_available) {
+    std::string wm_class = node_wm_class(node);
+    std::cerr << "warning: couldn't recover cmdline for window (" << (wm_class.empty() ? "unknown class" : wm_class)
+               << ") -- it will be skipped: ";
+    if (had_native_pid) {
+        std::cerr << "process already exited, or /proc access denied\n";
+    } else if (!node.contains("window")) {
+        std::cerr << "no pid field and no X11 window id either\n";
+    } else if (!x11_available) {
+        std::cerr << "no pid field and X11 is unavailable (no XWayland running?)\n";
+    } else {
+        std::cerr << "no pid field and the X11 lookup for this window failed (already closed?)\n";
+    }
+}
+
 void attach_cmdlines(json& node, X11PidResolver& x11) {
     std::optional<long> pid;
-    if (node.contains("pid") && node["pid"].is_number()) {
+    bool had_native_pid = node.contains("pid") && node["pid"].is_number();
+    if (had_native_pid) {
         pid = node["pid"].get<long>();
     } else if (node.contains("window") && node["window"].is_number()) {
         pid = x11.pid_for_window(node["window"].get<unsigned long>());
     }
+
+    bool recovered = false;
     if (pid) {
         auto argv = read_proc_cmdline(*pid);
-        if (!argv.empty()) node["_cmdline"] = argv;
+        if (!argv.empty()) {
+            node["_cmdline"] = argv;
+            recovered = true;
+        }
     }
+    if (!recovered && is_window_leaf(node)) {
+        warn_unrecoverable_window(node, had_native_pid, x11.available());
+    }
+
     if (node.contains("nodes")) {
         for (auto& child : node["nodes"]) attach_cmdlines(child, x11);
     }

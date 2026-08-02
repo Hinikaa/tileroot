@@ -85,9 +85,18 @@ WorkspaceSession build_hypr_workspace(const json& clients, const std::string& ta
         long pid = c.value("pid", 0L);
         // Same /proc cmdline recovery as the sway/i3 backend — see ipc_i3.cpp
         // read_proc_cmdline for the documented "skip if unrecoverable" policy.
+        // A window that vanishes from the dump this way is exactly the kind
+        // of surprise the design doc says should never be silent, so this
+        // logs which of the two reasons applies (matches ipc_i3.cpp's
+        // warn_unrecoverable_window) instead of dropping the window quietly.
         std::string path = "/proc/" + std::to_string(pid) + "/cmdline";
         FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) continue;
+        if (!f) {
+            std::cerr << "warning: couldn't recover cmdline for window ("
+                       << (w.wm_class.empty() ? "unknown class" : w.wm_class)
+                       << ") -- it will be skipped: process already exited, or /proc access denied\n";
+            continue;
+        }
         std::string buf;
         char chunk[256];
         size_t n;
@@ -100,7 +109,12 @@ WorkspaceSession build_hypr_workspace(const json& clients, const std::string& ta
                 start = i + 1;
             }
         }
-        if (w.cmdline.empty()) continue;  // unrecoverable — skip (matches ipc_i3.cpp policy)
+        if (w.cmdline.empty()) {
+            std::cerr << "warning: couldn't recover cmdline for window ("
+                       << (w.wm_class.empty() ? "unknown class" : w.wm_class)
+                       << ") -- it will be skipped: /proc/" << pid << "/cmdline was empty\n";
+            continue;
+        }
 
         auto at = c.value("at", std::vector<int>{0, 0});
         auto size = c.value("size", std::vector<int>{0, 0});

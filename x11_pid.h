@@ -24,6 +24,11 @@ public:
 
     std::optional<long> pid_for_window(unsigned long window_id);
 
+    // True if $DISPLAY was actually reachable -- lets a caller log WHY a
+    // pid lookup came back empty (no X11 at all vs. this one window's
+    // lookup specifically failing) instead of staying silent either way.
+    bool available() const { return display_ != nullptr; }
+
 private:
     void* display_ = nullptr;
     long net_wm_pid_atom_ = 0;

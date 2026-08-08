@@ -30,7 +30,7 @@ git clone https://github.com/Hinikaa/tileroot
 cd tileroot
 make tileroot
 ```
-Requires a C++17 compiler, the `nlohmann-json` header (`nlohmann-json` on Arch, `nlohmann-json3-dev` on Debian/Ubuntu), and `libX11` (`libx11` on Arch, `libx11-dev` on Debian/Ubuntu — used only to resolve a window's PID via `_NET_WM_PID` on i3, which doesn't include it in `GET_TREE` the way sway does; already present on any system that can run i3 as its WM).
+Requires a C++17 compiler, the `nlohmann-json` header (`nlohmann-json` on Arch, `nlohmann-json3-dev` on Debian/Ubuntu, `json-devel` on Fedora), and `libX11` (`libx11` on Arch, `libx11-dev` on Debian/Ubuntu, `libX11-devel` on Fedora — used only to resolve a window's PID via `_NET_WM_PID` on i3, which doesn't include it in `GET_TREE` the way sway does; already present on any system that can run i3 as its WM).
 
 ## Usage
 

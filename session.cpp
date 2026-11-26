@@ -210,3 +210,45 @@ bool workspace_name_less(const WorkspaceSession& a, const WorkspaceSession& b) {
     if (!na && nb) return false;
     return a.name < b.name;
 }
+
+std::vector<std::string> normalize_proc_cmdline(std::vector<std::string> argv, const std::string& exe_path) {
+    if (argv.size() != 1) return argv;
+    if (argv[0].find_first_of(" \t") == std::string::npos) return argv;
+
+    std::string clean_exe = exe_path;
+    static constexpr const char kDeleted[] = " (deleted)";
+    static constexpr size_t kDeletedLen = sizeof(kDeleted) - 1;
+    if (clean_exe.size() > kDeletedLen &&
+        clean_exe.compare(clean_exe.size() - kDeletedLen, kDeletedLen, kDeleted) == 0) {
+        clean_exe.erase(clean_exe.size() - kDeletedLen);
+    }
+
+    if (!clean_exe.empty() && argv[0] == clean_exe) {
+        return argv;
+    }
+
+    auto split_ws = [](const std::string& s, std::vector<std::string>& out) {
+        size_t i = 0;
+        while (i < s.size()) {
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+            if (i >= s.size()) break;
+            size_t j = i;
+            while (j < s.size() && s[j] != ' ' && s[j] != '\t') ++j;
+            out.push_back(s.substr(i, j - i));
+            i = j;
+        }
+    };
+
+    if (!clean_exe.empty() && argv[0].size() > clean_exe.size() &&
+        argv[0].compare(0, clean_exe.size(), clean_exe) == 0 &&
+        (argv[0][clean_exe.size()] == ' ' || argv[0][clean_exe.size()] == '\t')) {
+        std::vector<std::string> out;
+        out.push_back(clean_exe);
+        split_ws(argv[0].substr(clean_exe.size()), out);
+        return out;
+    }
+
+    std::vector<std::string> out;
+    split_ws(argv[0], out);
+    return out.empty() ? argv : out;
+}

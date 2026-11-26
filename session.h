@@ -63,3 +63,10 @@ std::string render_pretty(const WorkspaceSession& ws);
 // dump` always returns workspaces "sorted after workspace 1,2,3,4"
 // regardless of which WM produced them or what order its IPC returned them.
 bool workspace_name_less(const WorkspaceSession& a, const WorkspaceSession& b);
+
+// Normalizes /proc/<pid>/cmdline argv for Chromium/Electron/Brave apps that
+// overwrite NUL separators with spaces in place, yielding a single-element
+// vector like {"/opt/brave-bin/brave --profile-directory=Default"}.
+// Leaves normal multi-element argv and space-free single-element argv untouched.
+// Strips a trailing " (deleted)" suffix from exe_path before prefix matching.
+std::vector<std::string> normalize_proc_cmdline(std::vector<std::string> argv, const std::string& exe_path);

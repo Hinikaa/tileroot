@@ -173,6 +173,33 @@ static void test_workspace_name_less_ordering_and_overflow() {
     assert(workspace_name_less(w1, whuge));
 }
 
+static void test_normalize_proc_cmdline() {
+    {
+        auto got = normalize_proc_cmdline(
+            {"/opt/brave-bin/brave --profile-directory=Default --app-id=abc"},
+            "/opt/brave-bin/brave");
+        assert((got == std::vector<std::string>{
+                           "/opt/brave-bin/brave", "--profile-directory=Default", "--app-id=abc"}));
+    }
+    {
+        auto got = normalize_proc_cmdline({"/opt/My App/bin --flag --arg=1"}, "/opt/My App/bin");
+        assert((got == std::vector<std::string>{"/opt/My App/bin", "--flag", "--arg=1"}));
+    }
+    {
+        auto got = normalize_proc_cmdline({"/usr/bin/helium-browser --ozone-platform=wayland"},
+                                          "/usr/bin/helium-browser (deleted)");
+        assert((got == std::vector<std::string>{"/usr/bin/helium-browser", "--ozone-platform=wayland"}));
+    }
+    {
+        auto got = normalize_proc_cmdline({"/opt/brave-bin/brave --app-id=xyz"}, "");
+        assert((got == std::vector<std::string>{"/opt/brave-bin/brave", "--app-id=xyz"}));
+    }
+    {
+        std::vector<std::string> untouched{"echo", "; rm -rf ~"};
+        assert(normalize_proc_cmdline(untouched, "/bin/echo") == untouched);
+    }
+}
+
 int main() {
     test_json_round_trip();
     test_empty_workspace_round_trips_as_null_layout();
@@ -184,6 +211,7 @@ int main() {
     test_non_array_floating_or_scratchpad_throws_schema_error();
     test_non_object_geometry_throws_schema_error();
     test_workspace_name_less_ordering_and_overflow();
+    test_normalize_proc_cmdline();
     std::cout << "ok" << std::endl;
     return 0;
 }

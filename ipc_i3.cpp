@@ -28,7 +28,8 @@ constexpr size_t kHeaderLen = kMagicLen + 4 + 4;
 // "not a window leaf" (an internal split/workspace/output node).
 std::string node_wm_class(const json& node) {
     if (node.contains("app_id") && node["app_id"].is_string()) {
-        return node["app_id"].get<std::string>();
+        std::string app_id = node["app_id"].get<std::string>();
+        if (!app_id.empty()) return app_id;
     }
     auto wp = node.find("window_properties");
     if (wp != node.end() && wp->contains("class") && (*wp)["class"].is_string()) {
@@ -377,6 +378,11 @@ void I3ProtocolBackend::place_window(const std::string& window_id, const WindowI
 }
 
 bool I3ProtocolBackend::prepare_tree_layout(const LayoutNode& layout, const std::string& target_workspace) {
+    // Sway intentionally does not implement i3's append_layout command; skip
+    // directly to the workspace + geometry placement fallback instead of
+    // switching focus and sending a guaranteed-failing IPC command.
+    if (wm_name_ == "sway") return false;
+
     // Focus the target workspace first — append_layout inserts into
     // whatever's currently focused, and the workspace-empty check in
     // main.cpp's restore() already guarantees this one has nothing in it.

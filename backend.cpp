@@ -1,5 +1,7 @@
 #include "backend.h"
 
+#include <unistd.h>
+
 #include <cstdio>
 
 #include "ipc_hyprland.h"
@@ -33,6 +35,15 @@ std::vector<std::string> read_proc_cmdline(long pid, bool* open_failed) {
     }
     if (start < buf.size()) {
         argv.push_back(buf.substr(start));
+    }
+
+    if (argv.size() == 1 && argv[0].find_first_of(" \t") != std::string::npos &&
+        ::access(argv[0].c_str(), X_OK) != 0) {
+        std::string exe_link = "/proc/" + std::to_string(pid) + "/exe";
+        char exe_buf[4096];
+        ssize_t len = ::readlink(exe_link.c_str(), exe_buf, sizeof(exe_buf));
+        std::string exe_path = len > 0 ? std::string(exe_buf, static_cast<size_t>(len)) : std::string();
+        argv = normalize_proc_cmdline(std::move(argv), exe_path);
     }
     return argv;
 }

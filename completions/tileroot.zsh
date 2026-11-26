@@ -3,7 +3,11 @@
 
 _tileroot() {
     local -a commands
-    commands=('dump:save the current layout' 'restore:restore a saved layout')
+    commands=(
+        'dump:save the current layout'
+        'restore:restore a saved layout'
+        'doctor:check restore preconditions'
+    )
 
     if (( CURRENT == 2 )); then
         _describe 'command' commands
@@ -23,6 +27,9 @@ _tileroot() {
                 '--dry-run[show planned placement without doing it]' \
                 '--verbose[diagnostic output]' \
                 '1:session file:_files -g "*.json"'
+            ;;
+        doctor)
+            _arguments '1:session file:_files -g "*.json"'
             ;;
     esac
 }

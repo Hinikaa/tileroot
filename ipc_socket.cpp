@@ -10,7 +10,7 @@
 #include "backend.h"
 
 UnixSocket::UnixSocket(const std::string& path, std::chrono::milliseconds read_timeout) {
-    fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    fd_ = ::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd_ < 0) {
         throw IpcConnectionError("could not create socket: " + std::string(std::strerror(errno)));
     }
@@ -19,6 +19,7 @@ UnixSocket::UnixSocket(const std::string& path, std::chrono::milliseconds read_t
     tv.tv_sec = read_timeout.count() / 1000;
     tv.tv_usec = (read_timeout.count() % 1000) * 1000;
     ::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd_, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_un addr {};
     addr.sun_family = AF_UNIX;
@@ -44,6 +45,10 @@ void UnixSocket::write_all(const std::string& data) {
     while (sent < data.size()) {
         ssize_t n = ::write(fd_, data.data() + sent, data.size() - sent);
         if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                throw IpcTimeoutError("write timed out sending command to WM");
+            }
             throw IpcConnectionError("write failed: " + std::string(std::strerror(errno)));
         }
         sent += static_cast<size_t>(n);
@@ -57,6 +62,7 @@ std::string UnixSocket::read_exact(size_t n) {
     while (got < n) {
         ssize_t r = ::read(fd_, &out[got], n - got);
         if (r < 0) {
+            if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 throw IpcTimeoutError("read timed out waiting for WM response");
             }
@@ -76,6 +82,7 @@ std::string UnixSocket::read_until_eof() {
     while (true) {
         ssize_t r = ::read(fd_, buf, sizeof(buf));
         if (r < 0) {
+            if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 throw IpcTimeoutError("read timed out waiting for WM response");
             }

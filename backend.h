@@ -79,3 +79,9 @@ std::unique_ptr<WMBackend> detect_backend(std::chrono::milliseconds ipc_timeout)
 // reads the session.json wm field, independent of what's currently running
 // (the wm-field-mismatch check in restore compares this against detect_backend()).
 std::unique_ptr<WMBackend> make_backend(const std::string& wm_name, std::chrono::milliseconds ipc_timeout);
+
+// Reads NUL-separated argv from /proc/<pid>/cmdline. Returns empty vector if
+// the process has no readable cmdline (e.g. already exited, /proc denied, or
+// pid <= 0). If `open_failed` is non-null, sets it to true when pid <= 0 or
+// /proc/<pid>/cmdline could not be opened.
+std::vector<std::string> read_proc_cmdline(long pid, bool* open_failed = nullptr);

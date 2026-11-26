@@ -4,6 +4,7 @@
 #include <chrono>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "session.h"
@@ -53,7 +54,8 @@ public:
     // Interrupted for every slot that hadn't yet placed. Never throws for
     // a per-slot failure — every slot gets a Result (Section 2: log-and-skip).
     std::vector<Result> restore_all(const std::vector<WindowInfo>& slots,
-                                     const std::atomic<bool>* interrupted = nullptr);
+                                     const std::atomic<bool>* interrupted = nullptr,
+                                     const std::unordered_set<std::string>& pre_existing = {});
 
 private:
     Config cfg_;

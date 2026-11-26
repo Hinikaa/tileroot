@@ -1,5 +1,7 @@
 tileroot
 test_session
 test_matcher
+*.o
+*.d
 *.tmp
 session.json

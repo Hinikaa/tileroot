@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 extern char** environ;
@@ -36,7 +37,8 @@ WindowMatcher::WindowMatcher(Config cfg, ListWindowsFn list_windows, PlaceFn pla
     : cfg_(cfg), list_windows_(std::move(list_windows)), place_(std::move(place)) {}
 
 std::vector<WindowMatcher::Result> WindowMatcher::restore_all(const std::vector<WindowInfo>& slots,
-                                                                const std::atomic<bool>* interrupted) {
+                                                                const std::atomic<bool>* interrupted,
+                                                                const std::unordered_set<std::string>& pre_existing) {
     std::vector<Result> results(slots.size());
     std::vector<size_t> pending;  // indices into slots/results still waiting for a match
 
@@ -48,7 +50,9 @@ std::vector<WindowMatcher::Result> WindowMatcher::restore_all(const std::vector<
         }
     }
 
-    std::unordered_set<std::string> claimed;
+    // Seed claimed with pre-existing windows so windows already living on
+    // other workspaces aren't mistaken for newly launched ones and stolen.
+    std::unordered_set<std::string> claimed = pre_existing;
     const auto deadline = std::chrono::steady_clock::now() + cfg_.timeout;
 
     while (!pending.empty() && std::chrono::steady_clock::now() < deadline) {
@@ -57,15 +61,24 @@ std::vector<WindowMatcher::Result> WindowMatcher::restore_all(const std::vector<
             return results;
         }
 
+        // Cache list_windows_ per wm_class within a single poll tick so
+        // restoring N windows of the same class incurs 1 IPC round-trip per
+        // tick instead of N.
+        std::unordered_map<std::string, std::vector<std::string>> tick_cache;
         std::vector<size_t> still_pending;
         for (size_t i : pending) {
+            const std::string& wm_class = slots[i].wm_class;
+            auto it = tick_cache.find(wm_class);
+            if (it == tick_cache.end()) {
+                it = tick_cache.emplace(wm_class, list_windows_(wm_class)).first;
+            }
             // list_windows_ returns windows of this class in discovery
             // order; the first one NOT already claimed by an earlier slot
             // fills this slot — FIFO across same-class slots, in slot order
             // (design doc: "first new window of that class fills the first
             // saved slot of that class").
             std::string matched_id;
-            for (const auto& id : list_windows_(slots[i].wm_class)) {
+            for (const auto& id : it->second) {
                 if (claimed.find(id) == claimed.end()) {
                     matched_id = id;
                     break;

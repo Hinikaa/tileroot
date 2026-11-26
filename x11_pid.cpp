@@ -13,7 +13,11 @@ namespace {
 int ignore_x_errors(Display*, XErrorEvent*) { return 0; }
 }  // namespace
 
-X11PidResolver::X11PidResolver() {
+X11PidResolver::X11PidResolver() = default;
+
+void X11PidResolver::ensure_open() const {
+    if (initialized_) return;
+    initialized_ = true;
     Display* dpy = XOpenDisplay(nullptr);  // nullptr = use $DISPLAY
     if (!dpy) return;                      // inert resolver — no X11 available
     XSetErrorHandler(ignore_x_errors);     // process-wide; safe to set repeatedly
@@ -21,11 +25,17 @@ X11PidResolver::X11PidResolver() {
     net_wm_pid_atom_ = static_cast<long>(XInternAtom(dpy, "_NET_WM_PID", False));
 }
 
+bool X11PidResolver::available() const {
+    ensure_open();
+    return display_ != nullptr;
+}
+
 X11PidResolver::~X11PidResolver() {
     if (display_) XCloseDisplay(static_cast<Display*>(display_));
 }
 
 std::optional<long> X11PidResolver::pid_for_window(unsigned long window_id) {
+    ensure_open();
     if (!display_) return std::nullopt;
     Display* dpy = static_cast<Display*>(display_);
 

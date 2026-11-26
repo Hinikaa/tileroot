@@ -4,7 +4,7 @@ _tileroot() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="dump restore"
+    local commands="dump restore doctor"
     local dump_opts="--workspace -o --pretty --verbose"
     local restore_opts="--dry-run --verbose"
 
@@ -27,6 +27,9 @@ _tileroot() {
                 *) _filedir 'json' ;;
             esac
             COMPREPLY+=($(compgen -W "$restore_opts" -- "$cur"))
+            ;;
+        doctor)
+            _filedir 'json'
             ;;
     esac
 }

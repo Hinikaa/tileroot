@@ -3,6 +3,7 @@
 complete -c tileroot -f
 complete -c tileroot -n __fish_use_subcommand -a dump -d 'save the current layout'
 complete -c tileroot -n __fish_use_subcommand -a restore -d 'restore a saved layout'
+complete -c tileroot -n __fish_use_subcommand -a doctor -d 'check restore preconditions'
 complete -c tileroot -n __fish_use_subcommand -l version
 complete -c tileroot -n __fish_use_subcommand -l help
 
@@ -14,3 +15,5 @@ complete -c tileroot -n '__fish_seen_subcommand_from dump' -l verbose -d 'diagno
 complete -c tileroot -n '__fish_seen_subcommand_from restore' -l dry-run -d 'show planned placement without doing it'
 complete -c tileroot -n '__fish_seen_subcommand_from restore' -l verbose -d 'diagnostic output'
 complete -c tileroot -n '__fish_seen_subcommand_from restore' -r -a '(__fish_complete_suffix .json)'
+
+complete -c tileroot -n '__fish_seen_subcommand_from doctor' -r -a '(__fish_complete_suffix .json)'

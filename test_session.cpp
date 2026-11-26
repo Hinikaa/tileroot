@@ -119,6 +119,60 @@ static void test_pretty_render_empty_workspace() {
     assert(rendered.find("(empty)") != std::string::npos);
 }
 
+static void test_non_array_floating_or_scratchpad_throws_schema_error() {
+    {
+        json j = to_json(make_sample_session());
+        j["workspaces"][0]["floating"] = "not-an-array";
+        bool threw = false;
+        try {
+            session_from_json(j);
+        } catch (const SchemaValidationError& e) {
+            threw = true;
+            assert(std::string(e.what()).find("floating") != std::string::npos);
+        }
+        assert(threw);
+    }
+    {
+        json j = to_json(make_sample_session());
+        j["workspaces"][0]["scratchpad"] = 123;
+        bool threw = false;
+        try {
+            session_from_json(j);
+        } catch (const SchemaValidationError& e) {
+            threw = true;
+            assert(std::string(e.what()).find("scratchpad") != std::string::npos);
+        }
+        assert(threw);
+    }
+}
+
+static void test_non_object_geometry_throws_schema_error() {
+    json j = to_json(make_sample_session());
+    j["workspaces"][0]["layout"]["children"][0]["geometry"] = "bad";
+    bool threw = false;
+    try {
+        session_from_json(j);
+    } catch (const SchemaValidationError&) {
+        threw = true;
+    }
+    assert(threw);
+}
+
+static void test_workspace_name_less_ordering_and_overflow() {
+    WorkspaceSession w1{"1", "DP-1", std::nullopt, {}, {}};
+    WorkspaceSession w2{"2: web", "DP-1", std::nullopt, {}, {}};
+    WorkspaceSession w10{"10", "DP-1", std::nullopt, {}, {}};
+    WorkspaceSession walpha{"scratch", "DP-1", std::nullopt, {}, {}};
+    WorkspaceSession whuge{"99999999999999999999999999", "DP-1", std::nullopt, {}, {}};
+
+    assert(workspace_name_less(w1, w2));
+    assert(workspace_name_less(w2, w10));
+    assert(workspace_name_less(w10, walpha));
+    assert(!workspace_name_less(walpha, w1));
+    // Huge numeric prefix overflows long -> treated safely as non-numeric without throwing
+    assert(workspace_name_less(w1, whuge));
+}
+
 int main() {
     test_json_round_trip();
     test_empty_workspace_round_trips_as_null_layout();
@@ -127,6 +181,9 @@ int main() {
     test_unknown_wm_value_throws_schema_error();
     test_pretty_render_shows_box_drawing_tree();
     test_pretty_render_empty_workspace();
+    test_non_array_floating_or_scratchpad_throws_schema_error();
+    test_non_object_geometry_throws_schema_error();
+    test_workspace_name_less_ordering_and_overflow();
     std::cout << "ok" << std::endl;
     return 0;
 }

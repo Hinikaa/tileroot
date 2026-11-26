@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <unordered_map>
 
 #include "ipc_socket.h"
 
@@ -14,7 +15,7 @@ namespace {
 // exhaustive — Hyprland's plaintext/JSON IPC shape has been observed to
 // shift between releases (Section 1D), so anything outside this list gets
 // a warning, not a hard failure.
-const std::vector<std::string> kTestedVersions = {"0.55", "0.56"};
+const std::vector<std::string> kTestedVersions = {"0.55", "0.56", "0.57"};
 }  // namespace
 
 std::string HyprlandBackend::socket_dir() {
@@ -54,9 +55,14 @@ void HyprlandBackend::check_version() {
             return version.rfind(t, 0) == 0;  // version starts with a tested major.minor
         });
         if (!known && !version.empty()) {
+            std::string tested;
+            for (size_t i = 0; i < kTestedVersions.size(); ++i) {
+                if (i > 0) tested += ", ";
+                tested += kTestedVersions[i] + ".x";
+            }
             std::cerr << "warning: running Hyprland " << version
                       << " has not been tested with this tool — dump/restore may misparse. "
-                         "Tested versions: 0.55.x, 0.56.x\n";
+                         "Tested versions: " << tested << "\n";
         }
     } catch (const json::parse_error&) {
         // Advisory only — a malformed version response doesn't block the real command.
@@ -65,54 +71,34 @@ void HyprlandBackend::check_version() {
 
 namespace {
 
-// Builds one WorkspaceSession from the full `j/clients` list, keeping only
-// windows whose workspace name matches `target_name`. Shared by both dump()
-// paths (explicit --workspace filter and the all-workspaces enumeration) so
-// the clients-to-session translation exists exactly once.
-WorkspaceSession build_hypr_workspace(const json& clients, const std::string& target_name,
+// Builds one WorkspaceSession from pre-filtered `ws_clients` belonging to
+// `target_name`. Shared by both dump() paths (explicit --workspace filter
+// and the all-workspaces enumeration) so the clients-to-session translation
+// exists exactly once.
+WorkspaceSession build_hypr_workspace(const std::vector<const json*>& ws_clients, const std::string& target_name,
                                        const std::string& output_name) {
     WorkspaceSession ws;
     ws.name = target_name;
     ws.output = output_name;
 
     std::vector<WindowInfo> tiled;
-    for (const auto& c : clients) {
-        std::string ws_name = c.value("workspace", json::object()).value("name", "");
-        if (ws_name != target_name) continue;
-
+    for (const json* cp : ws_clients) {
+        const json& c = *cp;
         WindowInfo w;
         w.wm_class = c.value("class", "");
         long pid = c.value("pid", 0L);
-        // Same /proc cmdline recovery as the sway/i3 backend — see ipc_i3.cpp
-        // read_proc_cmdline for the documented "skip if unrecoverable" policy.
-        // A window that vanishes from the dump this way is exactly the kind
-        // of surprise the design doc says should never be silent, so this
-        // logs which of the two reasons applies (matches ipc_i3.cpp's
-        // warn_unrecoverable_window) instead of dropping the window quietly.
-        std::string path = "/proc/" + std::to_string(pid) + "/cmdline";
-        FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) {
-            std::cerr << "warning: couldn't recover cmdline for window ("
-                       << (w.wm_class.empty() ? "unknown class" : w.wm_class)
-                       << ") -- it will be skipped: process already exited, or /proc access denied\n";
-            continue;
-        }
-        std::string buf;
-        char chunk[256];
-        size_t n;
-        while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0) buf.append(chunk, n);
-        std::fclose(f);
-        size_t start = 0;
-        for (size_t i = 0; i < buf.size(); ++i) {
-            if (buf[i] == '\0') {
-                if (i > start) w.cmdline.push_back(buf.substr(start, i - start));
-                start = i + 1;
-            }
-        }
+        bool open_failed = false;
+        w.cmdline = read_proc_cmdline(pid, &open_failed);
         if (w.cmdline.empty()) {
             std::cerr << "warning: couldn't recover cmdline for window ("
-                       << (w.wm_class.empty() ? "unknown class" : w.wm_class)
-                       << ") -- it will be skipped: /proc/" << pid << "/cmdline was empty\n";
+                       << (w.wm_class.empty() ? "unknown class" : w.wm_class) << ") -- it will be skipped: ";
+            if (pid <= 0) {
+                std::cerr << "no pid reported by Hyprland\n";
+            } else if (open_failed) {
+                std::cerr << "process already exited, or /proc access denied\n";
+            } else {
+                std::cerr << "/proc/" << pid << "/cmdline was empty\n";
+            }
             continue;
         }
 
@@ -162,6 +148,17 @@ std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace
         throw IpcMalformedResponseError("workspaces reply was not a JSON array");
     }
 
+    // Group clients by workspace name in a single O(C) pass rather than
+    // scanning every client for every workspace.
+    std::unordered_map<std::string, std::vector<const json*>> by_ws;
+    for (const auto& c : clients) {
+        std::string ws_name = c.value("workspace", json::object()).value("name", "");
+        if (!ws_name.empty()) {
+            by_ws[ws_name].push_back(&c);
+        }
+    }
+
+    static const std::vector<const json*> kEmptyClients;
     std::vector<WorkspaceSession> result;
 
     if (!workspace_filter.empty()) {
@@ -172,7 +169,9 @@ std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace
                 break;
             }
         }
-        result.push_back(build_hypr_workspace(clients, workspace_filter, output_name));
+        auto it = by_ws.find(workspace_filter);
+        const auto& ws_clients = it != by_ws.end() ? it->second : kEmptyClients;
+        result.push_back(build_hypr_workspace(ws_clients, workspace_filter, output_name));
         return result;
     }
 
@@ -181,7 +180,10 @@ std::vector<WorkspaceSession> HyprlandBackend::dump(const std::string& workspace
     // whichever one has focus. `j/workspaces` already enumerates every
     // workspace with windows on it, across all monitors.
     for (const auto& w : workspaces) {
-        result.push_back(build_hypr_workspace(clients, w.value("name", ""), w.value("monitor", "")));
+        std::string ws_name = w.value("name", "");
+        auto it = by_ws.find(ws_name);
+        const auto& ws_clients = it != by_ws.end() ? it->second : kEmptyClients;
+        result.push_back(build_hypr_workspace(ws_clients, ws_name, w.value("monitor", "")));
     }
     std::sort(result.begin(), result.end(), workspace_name_less);
     return result;

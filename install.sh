@@ -27,7 +27,7 @@ TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading $URL ..."
-curl -sL "$URL" -o "$TMPDIR/$ASSET"
+curl -fsSL "$URL" -o "$TMPDIR/$ASSET"
 tar -xzf "$TMPDIR/$ASSET" -C "$TMPDIR"
 mv "$TMPDIR/tileroot" "$DEST/tileroot"
 chmod +x "$DEST/tileroot"

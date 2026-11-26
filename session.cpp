@@ -13,6 +13,9 @@ namespace {
 // crash (Section 2 GAP: SchemaValidationError).
 template <typename T>
 T require(const json& j, const char* field) {
+    if (!j.is_object()) {
+        throw SchemaValidationError(std::string("expected JSON object while reading field: ") + field);
+    }
     auto it = j.find(field);
     if (it == j.end()) {
         throw SchemaValidationError(std::string("missing required field: ") + field);
@@ -133,8 +136,16 @@ SessionFile session_from_json(const json& j) {
             ws.layout = layout_from_json(*layout_it);
         }  // else: std::nullopt — empty workspace (Section 1 decision 1A)
 
-        for (const auto& fj : require<json>(wsj, "floating")) ws.floating.push_back(window_from_json(fj));
-        for (const auto& sj : require<json>(wsj, "scratchpad")) ws.scratchpad.push_back(window_from_json(sj));
+        const json& floating = require<json>(wsj, "floating");
+        if (!floating.is_array()) {
+            throw SchemaValidationError("floating must be an array");
+        }
+        for (const auto& fj : floating) ws.floating.push_back(window_from_json(fj));
+        const json& scratchpad = require<json>(wsj, "scratchpad");
+        if (!scratchpad.is_array()) {
+            throw SchemaValidationError("scratchpad must be an array");
+        }
+        for (const auto& sj : scratchpad) ws.scratchpad.push_back(window_from_json(sj));
 
         session.workspaces.push_back(std::move(ws));
     }
@@ -186,7 +197,11 @@ bool workspace_name_less(const WorkspaceSession& a, const WorkspaceSession& b) {
         size_t i = 0;
         while (i < name.size() && std::isdigit(static_cast<unsigned char>(name[i]))) ++i;
         if (i == 0) return std::nullopt;
-        return std::stol(name.substr(0, i));
+        try {
+            return std::stol(name.substr(0, i));
+        } catch (const std::out_of_range&) {
+            return std::nullopt;
+        }
     };
     auto na = leading_num(a.name);
     auto nb = leading_num(b.name);

@@ -1,27 +1,46 @@
 CXX ?= g++
-CXXFLAGS = -std=c++17 -O2 -Wall -Wextra
+CXXFLAGS ?= -O2
+override CXXFLAGS += -std=c++17 -Wall -Wextra -MMD -MP
+PREFIX ?= /usr/local
 
 CORE_SRCS = session.cpp matcher.cpp backend.cpp ipc_socket.cpp ipc_i3.cpp ipc_hyprland.cpp x11_pid.cpp
-CORE_HDRS = session.h matcher.h backend.h ipc_socket.h ipc_i3.h ipc_hyprland.h x11_pid.h
+CORE_OBJS = $(CORE_SRCS:.cpp=.o)
 
 # libX11 is only needed by x11_pid.cpp (i3's GET_TREE has no "pid" field on
 # window nodes, unlike sway's — see ipc_i3.cpp attach_cmdlines). Any system
 # that can run i3 as its WM already has libX11 installed as a dependency of
 # i3 itself, so this isn't a new user-facing dependency in practice.
-tileroot: main.cpp $(CORE_SRCS) $(CORE_HDRS)
-	$(CXX) $(CXXFLAGS) -o tileroot main.cpp $(CORE_SRCS) -lX11
+tileroot: main.o $(CORE_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o tileroot main.o $(CORE_OBJS) -lX11
 
-test_session: test_session.cpp session.cpp session.h
-	$(CXX) $(CXXFLAGS) -o test_session test_session.cpp session.cpp
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-test_matcher: test_matcher.cpp matcher.cpp matcher.h session.cpp session.h
-	$(CXX) $(CXXFLAGS) -o test_matcher test_matcher.cpp matcher.cpp session.cpp
+test_session: test_session.o session.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o test_session test_session.o session.o
+
+test_matcher: test_matcher.o matcher.o session.o
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o test_matcher test_matcher.o matcher.o session.o
 
 test: test_session test_matcher
 	./test_session
 	./test_matcher
 
-clean:
-	rm -f tileroot test_session test_matcher
+install: tileroot
+	install -Dm755 tileroot $(DESTDIR)$(PREFIX)/bin/tileroot
+	install -Dm644 completions/tileroot.bash $(DESTDIR)$(PREFIX)/share/bash-completion/completions/tileroot
+	install -Dm644 completions/tileroot.zsh $(DESTDIR)$(PREFIX)/share/zsh/site-functions/_tileroot
+	install -Dm644 completions/tileroot.fish $(DESTDIR)$(PREFIX)/share/fish/vendor_completions.d/tileroot.fish
 
-.PHONY: test clean
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/tileroot \
+	      $(DESTDIR)$(PREFIX)/share/bash-completion/completions/tileroot \
+	      $(DESTDIR)$(PREFIX)/share/zsh/site-functions/_tileroot \
+	      $(DESTDIR)$(PREFIX)/share/fish/vendor_completions.d/tileroot.fish
+
+clean:
+	rm -f tileroot test_session test_matcher *.o *.d
+
+-include $(wildcard *.d)
+
+.PHONY: test install uninstall clean

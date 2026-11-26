@@ -77,8 +77,8 @@ $ tileroot restore ~/.config/tileroot/work.json
 
 ## Status
 
-- **Hyprland backend: live-validated, including multi-monitor (v0.3.0).** Tested end-to-end against a real running Hyprland session — `dump` across 5 real workspaces spread over a live multi-monitor setup, `--pretty`, atomic `-o` writes, schema validation, and the wm-mismatch/occupied-workspace refusal paths all confirmed working against real windows.
-- **i3 backend (`I3ProtocolBackend`): live-validated against a real headless i3 session, including multi-monitor (v0.3.0).** Not just "should work" — actually tested: `dump` across 4 workspaces spread over two real (fake-output) monitors, `--pretty`, and a full `restore` round-trip putting every window back on its original workspace name, including the `append_layout` tree reconstruction and floating-window restoration, verified byte-for-byte against the original layout. Several real bugs were found and fixed in the process (see below) that no amount of reading the protocol spec would have caught.
+- **Hyprland backend: live-validated across 0.55.x–0.57.x, including multi-monitor (v0.5.0).** Tested end-to-end against real running Hyprland sessions (including Hyprland 0.57.2) — `dump` across multiple real workspaces and monitors, `--pretty`, atomic `-o` writes, `doctor`, and the wm-mismatch/occupied-workspace refusal paths all confirmed working against real windows.
+- **i3 backend (`I3ProtocolBackend`): live-validated against a real headless i3 session, including multi-monitor (v0.3.0 / v0.5.0).** Not just "should work" — actually tested: `dump` across 4 workspaces spread over two real (fake-output) monitors, `--pretty`, `doctor`, and a full `restore` round-trip putting every window back on its original workspace name, including the `append_layout` tree reconstruction and floating-window restoration, verified byte-for-byte against the original layout. Several real bugs were found and fixed in the process (see below) that no amount of reading the protocol spec would have caught.
 - **Sway backend: shares 100% of the same code path as i3** (same `I3ProtocolBackend` class — sway implements i3's IPC directly, not a compatible reimplementation of it), so the fixes below should apply equally. Not independently re-verified against a live sway session by the maintainer, though — no sway binary available in this environment. If you run sway, testing this specific version is genuinely useful; earlier versions had real bugs (below) that only surfaced on real sway.
 - **What got fixed getting i3 working, in order of discovery:**
   1. A real sway user reported `dump` only capturing scratchpad windows (v0.1.1) — `GET_TREE`'s `focused` flag lives on the focused leaf window, not its ancestor workspace, so detection silently fell through to sway's internal `__i3` pseudo-output. Fixed via `GET_WORKSPACES` instead of inferring focus from `GET_TREE`.
@@ -89,7 +89,12 @@ $ tileroot restore ~/.config/tileroot/work.json
 - **Multi-monitor / multi-workspace on sway/i3/Hyprland:** now live-tested (v0.3.0) — see above. `restore` refuses per-workspace if occupied, and reconstructs each workspace independently.
 - **Scratchpad windows (sway/i3) are still not captured** by `dump` — the `__i3_scratch` workspace is now correctly excluded from being mistaken for a real workspace, but its contents aren't read into the session yet. Separate from the bugs above; a real feature gap, not a bug.
 - **`tileroot doctor` (v0.4.0):** checks WM detection, IPC reachability, session-file validity, wm match, and per-workspace occupancy up front and reports pass/fail on each, instead of restore stopping at the first failure. Live-tested against a real running Hyprland desktop, including the occupied-workspace and malformed-file/missing-file paths.
-- **`dump` now warns instead of silently dropping a window it can't recover a `cmdline` for (v0.4.0)** — previously a window with no readable `/proc/<pid>/cmdline` (process already exited, `/proc` access denied, or no pid at all) just vanished from the session file with no explanation; now `dump` prints exactly which of those reasons applies, for both the i3/sway and Hyprland backends.
+- **`dump` warns instead of silently dropping unrecoverable windows (v0.4.0)** — when `/proc/<pid>/cmdline` cannot be read (process exited, `/proc` access denied, or no pid at all), `dump` prints which reason applies on both backends.
+- **Performance, safety & packaging polish (v0.5.0):**
+  - `restore` snapshots pre-existing windows per class before launching so existing windows on other workspaces are never claimed or stolen, and caches per-class `list_windows` lookups once per poll tick.
+  - `restore` and `doctor` issue a single `dump("")` IPC query instead of one query per workspace; `HyprlandBackend::dump` groups clients by workspace in a single O(C) pass; `I3ProtocolBackend::dump` resolves `/proc` & X11 only for selected target workspaces; `X11PidResolver` opens `$DISPLAY` lazily (skipped completely on Wayland/sway).
+  - Sockets use `SOCK_CLOEXEC` + `SO_SNDTIMEO`/`SO_RCVTIMEO` + `EINTR` retries; `atomic_write` uses PID-scoped temp paths and cleans up on error; i3 workspace names are escaped in IPC commands; schema validation catches non-array/non-object payloads cleanly.
+  - `Makefile` adds incremental builds, `LDFLAGS` support, and `install`/`uninstall` targets; completions include `doctor`; `release.yml` publishes `install.sh` directly to GitHub Releases.
 
 None of this is silent — every gap above is either a loud error at runtime or a documented limitation, never a quiet wrong answer.
 
@@ -97,11 +102,11 @@ None of this is silent — every gap above is either a loud error at runtime or 
 
 | | |
 |---|---|
-| Lines of C++ (core + tests) | 2,196 |
-| Test functions / assertions | 14 / 36 |
-| Runtime dependencies | 2 (`nlohmann/json` header-only, `libX11`) |
-| Binary size (release, unstripped) | 476 KB |
-| Binary size (stripped) | 391 KB |
+| Lines of C++ (core + tests) | 2,428 |
+| Test functions / assertions | 19 / 51 |
+| Runtime dependencies | 2 (`nlohmann/json` header-only at build time, `libX11`) |
+| Binary size (release, unstripped) | 486 KB |
+| Binary size (stripped) | 395 KB |
 | Compiler warnings (`-Wall -Wextra`) | 0 |
 | Shells that never see your `cmdline` | all of them (see [Security](#security)) |
 | Design-review rounds before implementation | 3 rounds, 14 issues caught before a line of code existed |

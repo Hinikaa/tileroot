@@ -1,8 +1,12 @@
+#include <unistd.h>
+
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <unordered_set>
 
 #include "backend.h"
 #include "matcher.h"
@@ -89,22 +93,25 @@ SessionLoadStatus load_session_file(const std::string& path, SessionFile& out, s
 // truncated/corrupt by an interrupted write, and both the write and the
 // rename are checked rather than assumed to succeed.
 bool atomic_write(const std::string& path, const std::string& content) {
-    std::string tmp = path + ".tmp";
+    std::string tmp = path + ".tmp." + std::to_string(::getpid());
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out) {
             std::cerr << "error: could not open " << tmp << " for writing\n";
             return false;
         }
-        out << content;
+        out.write(content.data(), static_cast<std::streamsize>(content.size()));
         out.flush();
+        out.close();
         if (!out) {
             std::cerr << "error: write failed to " << tmp << "\n";
+            std::remove(tmp.c_str());
             return false;
         }
     }
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::cerr << "error: could not rename " << tmp << " to " << path << ": " << std::strerror(errno) << "\n";
+        std::remove(tmp.c_str());
         return false;
     }
     return true;
@@ -200,19 +207,23 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
     if (verbose) std::cerr << "verbose: wm matches (" << session.wm << "), " << session.workspaces.size()
                             << " workspace(s) in session\n";
 
-    // Refuse up front if ANY target workspace already has windows — no
-    // partial application across workspaces, matches the design doc's
-    // "refuses if target workspace already has windows."
-    for (const auto& ws : session.workspaces) {
-        std::vector<WorkspaceSession> live;
-        try {
-            live = current->dump(ws.name);
-        } catch (const std::exception& e) {
-            log_ipc_failure(e, "error: could not check target workspace " + ws.name + ": ");
-            return 1;
+    // Refuse up front if ANY target workspace already has windows — fetch all
+    // live workspaces once instead of issuing one IPC round-trip per workspace.
+    std::vector<WorkspaceSession> live_all;
+    try {
+        live_all = current->dump("");
+    } catch (const std::exception& e) {
+        log_ipc_failure(e, "error: could not query live workspaces: ");
+        return 1;
+    }
+    std::unordered_set<std::string> occupied_workspaces;
+    for (const auto& lws : live_all) {
+        if (lws.layout.has_value() || !lws.floating.empty()) {
+            occupied_workspaces.insert(lws.name);
         }
-        bool occupied = !live.empty() && (live[0].layout.has_value() || !live[0].floating.empty());
-        if (occupied) {
+    }
+    for (const auto& ws : session.workspaces) {
+        if (occupied_workspaces.count(ws.name)) {
             std::cerr << "error: target workspace already has windows: " << ws.name << "\n";
             return 1;
         }
@@ -257,6 +268,25 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
         return 0;
     }
 
+    // Snapshot already-open windows per unique wm_class so pre-existing
+    // windows on other workspaces are never claimed or stolen during restore.
+    std::unordered_set<std::string> pre_existing;
+    {
+        std::unordered_set<std::string> seen_classes;
+        try {
+            for (const auto& slot : slots) {
+                if (seen_classes.insert(slot.wm_class).second) {
+                    for (const auto& id : current->list_windows(slot.wm_class)) {
+                        pre_existing.insert(id);
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            log_ipc_failure(e, "error: could not list existing windows: ");
+            return 1;
+        }
+    }
+
     std::signal(SIGINT, handle_sigint);  // Section 4A
 
     WindowMatcher::Config cfg;
@@ -269,7 +299,7 @@ int run_restore(const std::string& file_arg, bool dry_run, bool verbose) {
             }
         });
 
-    auto results = matcher.restore_all(slots, &g_interrupted);
+    auto results = matcher.restore_all(slots, &g_interrupted, pre_existing);
 
     int placed = 0, failed = 0;
     for (const auto& r : results) {
@@ -321,8 +351,11 @@ int run_doctor(const std::string& file_arg) {
         return 1;
     }
 
+    bool ipc_ok = false;
+    std::vector<WorkspaceSession> live_all;
     try {
-        backend->dump("");
+        live_all = backend->dump("");
+        ipc_ok = true;
         check(true, backend->wm_name() + " IPC socket is reachable");
     } catch (const std::exception& e) {
         check(false, backend->wm_name() + " IPC socket is reachable");
@@ -351,16 +384,18 @@ int run_doctor(const std::string& file_arg) {
     check(wm_match, "session matches the running window manager (" + backend->wm_name() + ")");
     if (!wm_match) std::cout << "  session was saved for " << session.wm << "\n";
 
-    for (const auto& ws : session.workspaces) {
-        std::vector<WorkspaceSession> live;
-        try {
-            live = backend->dump(ws.name);
-        } catch (const std::exception& e) {
-            check(false, "workspace " + ws.name + " is reachable");
-            log_ipc_failure(e, "  ");
-            continue;
+    if (!ipc_ok) {
+        return 1;
+    }
+
+    std::unordered_set<std::string> occupied_workspaces;
+    for (const auto& lws : live_all) {
+        if (lws.layout.has_value() || !lws.floating.empty()) {
+            occupied_workspaces.insert(lws.name);
         }
-        bool occupied = !live.empty() && (live[0].layout.has_value() || !live[0].floating.empty());
+    }
+    for (const auto& ws : session.workspaces) {
+        bool occupied = occupied_workspaces.count(ws.name) > 0;
         check(!occupied, "workspace " + ws.name + " is free to restore into");
         if (occupied) std::cout << "  already has windows -- restore will refuse this workspace\n";
     }
@@ -381,7 +416,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (args[0] == "--version") {
-        std::cout << "tileroot 0.4.0\n";
+        std::cout << "tileroot 0.5.0\n";
         return 0;
     }
 

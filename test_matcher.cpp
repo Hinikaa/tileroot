@@ -130,6 +130,52 @@ static void test_restore_all_respects_interrupt_flag() {
     assert(results[0].status == WindowMatcher::Status::Interrupted);
 }
 
+static void test_restore_all_ignores_preexisting_windows() {
+    WindowMatcher::Config cfg;
+    cfg.timeout = std::chrono::milliseconds(200);
+    cfg.poll_interval = std::chrono::milliseconds(5);
+
+    int calls = 0;
+    auto list_windows = [&calls](const std::string& wm_class) -> std::vector<std::string> {
+        if (wm_class != "term") return {};
+        ++calls;
+        if (calls == 1) return {"old-win"};  // only pre-existing window on tick 1
+        return {"old-win", "new-win"};        // newly launched window appears on tick 2
+    };
+    std::string placed_id;
+    auto place = [&placed_id](const std::string& window_id, size_t, const WindowInfo&) {
+        placed_id = window_id;
+    };
+
+    WindowMatcher matcher(cfg, list_windows, place);
+    auto results = matcher.restore_all({{"term", {"/usr/bin/true"}, 0, 0, 10, 10}}, nullptr, {"old-win"});
+    assert(results[0].status == WindowMatcher::Status::Placed);
+    assert(results[0].window_id == "new-win");
+    assert(placed_id == "new-win");
+}
+
+static void test_restore_all_caches_list_windows_per_tick() {
+    WindowMatcher::Config cfg;
+    cfg.timeout = std::chrono::milliseconds(60);
+    cfg.poll_interval = std::chrono::milliseconds(25);
+
+    int calls = 0;
+    auto list_windows = [&calls](const std::string&) -> std::vector<std::string> {
+        ++calls;
+        return {};
+    };
+    WindowMatcher matcher(cfg, list_windows, [](const std::string&, size_t, const WindowInfo&) {});
+    std::vector<WindowInfo> slots = {
+        {"term", {"/usr/bin/true"}, 0, 0, 10, 10},
+        {"term", {"/usr/bin/true"}, 10, 0, 10, 10},
+        {"term", {"/usr/bin/true"}, 20, 0, 10, 10},
+    };
+    auto results = matcher.restore_all(slots);
+    assert(results.size() == 3);
+    // 60ms timeout with 25ms sleep runs at most 3 poll ticks -> <= 3 IPC calls (not 3 * 3 = 9).
+    assert(calls >= 1 && calls <= 4);
+}
+
 int main() {
     test_spawn_does_not_shell_interpret_cmdline();
     test_spawn_nonexistent_binary_returns_nullopt();
@@ -138,6 +184,8 @@ int main() {
     test_restore_all_honors_configured_timeout();
     test_restore_all_fifo_matches_same_class_in_slot_order();
     test_restore_all_respects_interrupt_flag();
+    test_restore_all_ignores_preexisting_windows();
+    test_restore_all_caches_list_windows_per_tick();
     std::cout << "ok" << std::endl;
     return 0;
 }

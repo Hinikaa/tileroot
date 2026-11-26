@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -38,31 +39,6 @@ std::string node_wm_class(const json& node) {
 
 bool is_window_leaf(const json& node) {
     return !node_wm_class(node).empty();
-}
-
-// Reads argv from /proc/<pid>/cmdline (NUL-separated). Best-effort: an
-// empty result means the process couldn't be inspected (permission,
-// already exited) — such windows are skipped from the dump rather than
-// saving a session that can never be restored (schema requires non-empty
-// cmdline; see session.cpp window_from_json).
-std::vector<std::string> read_proc_cmdline(long pid) {
-    std::vector<std::string> argv;
-    std::string path = "/proc/" + std::to_string(pid) + "/cmdline";
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return argv;
-    std::string buf;
-    char chunk[256];
-    size_t n;
-    while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0) buf.append(chunk, n);
-    std::fclose(f);
-    size_t start = 0;
-    for (size_t i = 0; i < buf.size(); ++i) {
-        if (buf[i] == '\0') {
-            if (i > start) argv.push_back(buf.substr(start, i - start));
-            start = i + 1;
-        }
-    }
-    return argv;
 }
 
 // Mutates `node` in place, attaching a "_cmdline" JSON array wherever a
@@ -199,6 +175,16 @@ json layout_to_append_json(const LayoutNode& node) {
     };
 }
 
+std::string escape_i3_string(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    return out;
+}
+
 // Recursively collects every type=="workspace" node under `node` into
 // `out`. Real i3 nests workspaces inside a "content" con wrapper alongside
 // dockarea containers (for bars) rather than putting them directly under
@@ -207,13 +193,13 @@ json layout_to_append_json(const LayoutNode& node) {
 // depth) is what makes this correct regardless of bar config or future i3
 // tree changes. Does not descend into a found workspace's own children —
 // workspaces don't nest inside each other.
-void collect_workspaces(const json& node, std::vector<const json*>& out) {
+void collect_workspaces_mut(json& node, std::vector<json*>& out) {
     if (node.value("type", "") == "workspace") {
         out.push_back(&node);
         return;
     }
     if (node.contains("nodes")) {
-        for (const auto& child : node["nodes"]) collect_workspaces(child, out);
+        for (auto& child : node["nodes"]) collect_workspaces_mut(child, out);
     }
 }
 
@@ -317,48 +303,37 @@ json I3ProtocolBackend::request(uint32_t type, const std::string& payload) {
 
 std::vector<WorkspaceSession> I3ProtocolBackend::dump(const std::string& workspace_filter) {
     json tree = request(kGetTree, "");
-    X11PidResolver x11;  // inert (all lookups return nullopt) if no X11 display is available
-    attach_cmdlines(tree, x11);
-
     std::vector<WorkspaceSession> result;
     if (!tree.contains("nodes")) return result;
 
-    if (!workspace_filter.empty()) {
-        // Explicit --workspace NAME: search every real output for a
-        // workspace with this name. Never the "__i3" pseudo-output — that's
-        // sway/i3's internal scratchpad container, not a real workspace
-        // target (see the empty-filter comment below for why it matters
-        // here too). Workspaces are found via collect_workspaces(), not by
-        // assuming they sit directly under the output — real i3 nests them
-        // inside a "content" wrapper alongside dock areas for bars.
-        for (const auto& output : tree["nodes"]) {
-            if (output.value("type", "") != "output" || output.value("name", "") == "__i3") continue;
-            std::vector<const json*> workspaces_in_output;
-            collect_workspaces(output, workspaces_in_output);
-            for (const json* ws_node : workspaces_in_output) {
-                if (ws_node->value("name", "") != workspace_filter) continue;
-                result.push_back(build_workspace_session(*ws_node, output.value("name", "")));
-            }
+    // Select only real outputs (never "__i3", which holds sway/i3's internal
+    // scratchpad container) and matching workspaces BEFORE walking /proc and
+    // X11 so non-target workspaces and scratchpad items aren't probed or warned on.
+    struct TargetWs {
+        std::string output_name;
+        json* node;
+    };
+    std::vector<TargetWs> targets;
+    for (auto& output : tree["nodes"]) {
+        if (output.value("type", "") != "output" || output.value("name", "") == "__i3") continue;
+        std::string out_name = output.value("name", "");
+        std::vector<json*> workspaces_in_output;
+        collect_workspaces_mut(output, workspaces_in_output);
+        for (json* ws_node : workspaces_in_output) {
+            if (!workspace_filter.empty() && ws_node->value("name", "") != workspace_filter) continue;
+            targets.push_back({out_name, ws_node});
         }
-        return result;
     }
 
-    // No filter: dump every workspace on every real output (monitor), not
-    // just the one the command was run from — a user with multiple monitors
-    // wants their whole session captured, not just whichever screen has
-    // focus. Never the "__i3" pseudo-output — that's sway/i3's internal
-    // scratchpad container, not a real workspace. Sorted by workspace
-    // number (see workspace_less) so the output is stable and matches how
-    // i3/sway itself orders workspaces, regardless of tree traversal order.
-    for (const auto& output : tree["nodes"]) {
-        if (output.value("type", "") != "output" || output.value("name", "") == "__i3") continue;
-        std::vector<const json*> workspaces_in_output;
-        collect_workspaces(output, workspaces_in_output);
-        for (const json* ws_node : workspaces_in_output) {
-            result.push_back(build_workspace_session(*ws_node, output.value("name", "")));
-        }
+    X11PidResolver x11;  // lazy: only opens $DISPLAY if a window has no native pid field
+    for (auto& t : targets) {
+        attach_cmdlines(*t.node, x11);
+        result.push_back(build_workspace_session(*t.node, t.output_name));
     }
-    std::sort(result.begin(), result.end(), workspace_name_less);
+
+    if (workspace_filter.empty()) {
+        std::sort(result.begin(), result.end(), workspace_name_less);
+    }
     return result;
 }
 
@@ -391,12 +366,13 @@ void I3ProtocolBackend::place_window(const std::string& window_id, const WindowI
     // lands on whatever workspace is currently focused, not the saved one.
     // A relaunched window defaults to tiled regardless of how it was saved
     // (confirmed via live testing), so floating state must be forced
-    // explicitly rather than assumed — "move position"/"resize set" are
-    // floating-specific commands that silently no-op on a still-tiled window.
-    std::string cmd = "[con_id=" + window_id + "] move to workspace \"" + target_workspace + "\", " +
-                       (is_floating ? "floating enable, " : "") + "move position " + std::to_string(slot.x) + " " +
-                       std::to_string(slot.y) + ", resize set " + std::to_string(slot.w) + " " +
-                       std::to_string(slot.h);
+    // explicitly rather than assumed — "move position" is floating-only
+    // and is skipped when placing a tiled fallback window.
+    std::string cmd = "[con_id=" + window_id + "] move to workspace \"" + escape_i3_string(target_workspace) + "\", ";
+    if (is_floating) {
+        cmd += "floating enable, move position " + std::to_string(slot.x) + " " + std::to_string(slot.y) + ", ";
+    }
+    cmd += "resize set " + std::to_string(slot.w) + " " + std::to_string(slot.h);
     request(kRunCommand, cmd);
 }
 
@@ -404,7 +380,7 @@ bool I3ProtocolBackend::prepare_tree_layout(const LayoutNode& layout, const std:
     // Focus the target workspace first — append_layout inserts into
     // whatever's currently focused, and the workspace-empty check in
     // main.cpp's restore() already guarantees this one has nothing in it.
-    json focus_reply = request(kRunCommand, "workspace \"" + target_workspace + "\"");
+    json focus_reply = request(kRunCommand, "workspace \"" + escape_i3_string(target_workspace) + "\"");
     if (!focus_reply.is_array() || focus_reply.empty() || !focus_reply[0].value("success", false)) {
         return false;
     }
@@ -417,7 +393,17 @@ bool I3ProtocolBackend::prepare_tree_layout(const LayoutNode& layout, const std:
     if (fd < 0) return false;
 
     std::string dumped = append_json.dump();
-    bool write_ok = ::write(fd, dumped.data(), dumped.size()) == static_cast<ssize_t>(dumped.size());
+    size_t written = 0;
+    bool write_ok = true;
+    while (written < dumped.size()) {
+        ssize_t n = ::write(fd, dumped.data() + written, dumped.size() - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            write_ok = false;
+            break;
+        }
+        written += static_cast<size_t>(n);
+    }
     ::close(fd);
     std::string actual_path(tmp_template.data());
     if (!write_ok) {
